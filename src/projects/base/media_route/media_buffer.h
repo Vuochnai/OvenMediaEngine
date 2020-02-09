@@ -18,7 +18,7 @@
 #include "media_type.h"
 #include "base/common_types.h"
 
-enum class MediaPacketFlag
+enum class MediaPacketFlag : uint8_t
 {
 	NoFlag,
 	Key
@@ -27,25 +27,27 @@ enum class MediaPacketFlag
 class MediaPacket
 {
 public:
-	MediaPacket(MediaCommonType::MediaType media_type, int32_t track_id, const void *data, int32_t data_size, int64_t pts, MediaPacketFlag flags)
+	MediaPacket(common::MediaType media_type, int32_t track_id, const void *data, int32_t data_size, int64_t pts, MediaPacketFlag flags, int64_t cts = 0)
 		: _media_type(media_type),
 		  _track_id(track_id),
 		  _pts(pts),
-		  _flags(flags)
+		  _flags(flags),
+		  _cts(cts)
 	{
 		_data->Append(data, data_size);
 	}
 
-	MediaPacket(MediaCommonType::MediaType media_type, int32_t track_id, const std::shared_ptr<ov::Data> &data, int64_t pts, MediaPacketFlag flags)
+	MediaPacket(common::MediaType media_type, int32_t track_id, const std::shared_ptr<ov::Data> &data, int64_t pts, MediaPacketFlag flags, int64_t cts = 0)
 		: _media_type(media_type),
 		  _track_id(track_id),
 		  _pts(pts),
-		  _flags(flags)
+		  _flags(flags),
+		  _cts(cts)
 	{
 		_data->Append(data.get());
 	}
 
-	MediaCommonType::MediaType GetMediaType() const noexcept
+	common::MediaType GetMediaType() const noexcept
 	{
 		return _media_type;
 	}
@@ -80,16 +82,41 @@ public:
 		return _flags;
 	}
 
+    int64_t GetCts() const noexcept
+    {
+        return _cts;
+    }
+
+    void SetCts(int64_t cts)
+    {
+        _cts = cts;
+    }
+
 	std::unique_ptr<FragmentationHeader> _frag_hdr = std::make_unique<FragmentationHeader>();
 
+	std::unique_ptr<MediaPacket> ClonePacket()
+	{
+		auto packet = std::make_unique<MediaPacket>(
+			GetMediaType(),
+			GetTrackId(),
+			GetData(),
+			GetPts(),
+			GetFlags(),
+            GetCts()
+		);
+		::memcpy(packet->_frag_hdr.get(), _frag_hdr.get(), sizeof(FragmentationHeader));
+		return packet;
+	}
+
 protected:
-	MediaCommonType::MediaType _media_type = MediaCommonType::MediaType::Unknown;
+	common::MediaType _media_type = common::MediaType::Unknown;
 	int32_t _track_id = -1;
 
 	std::shared_ptr<ov::Data> _data = std::make_shared<ov::Data>();
 
 	int64_t _pts = -1;
 	MediaPacketFlag _flags = MediaPacketFlag::NoFlag;
+    int64_t _cts = 0; // cts = pts - dts
 };
 
 class MediaFrame
@@ -97,24 +124,22 @@ class MediaFrame
 public:
 	MediaFrame() = default;
 
-	MediaFrame(MediaCommonType::MediaType media_type, int32_t track_id, const uint8_t *data, int32_t data_size, int64_t pts, int32_t flags)
+	MediaFrame(common::MediaType media_type, int32_t track_id, const uint8_t *data, int32_t data_size, int64_t pts, int32_t flags)
 		: _media_type(media_type),
 		  _track_id(track_id),
-
-		  _flags(flags),
-
-		  _pts(pts)
+          _pts(pts),
+		  _flags(flags)
 	{
 		SetBuffer(data, data_size);
 	}
 
-	MediaFrame(MediaCommonType::MediaType media_type, int32_t track_id, const uint8_t *data, int32_t data_size, int64_t pts)
+	MediaFrame(common::MediaType media_type, int32_t track_id, const uint8_t *data, int32_t data_size, int64_t pts)
 		: MediaFrame(media_type, track_id, data, data_size, pts, 0)
 	{
 	}
 
 	MediaFrame(const uint8_t *data, int32_t data_size, int64_t pts)
-		: MediaFrame(MediaCommonType::MediaType::Unknown, 0, data, data_size, pts, 0)
+		: MediaFrame(common::MediaType::Unknown, 0, data, data_size, pts, 0)
 	{
 	}
 
@@ -217,12 +242,12 @@ public:
 		_data_buffer[plane].resize(static_cast<unsigned long>(capacity));
 	}
 
-	void SetMediaType(MediaCommonType::MediaType media_type)
+	void SetMediaType(common::MediaType media_type)
 	{
 		_media_type = media_type;
 	}
 
-	MediaCommonType::MediaType GetMediaType() const
+	common::MediaType GetMediaType() const
 	{
 		return _media_type;
 	}
@@ -348,31 +373,31 @@ public:
 		{
 			case 1:
 				_channels = channels;
-				_channel_layout = MediaCommonType::AudioChannel::Layout::LayoutMono;
+				_channel_layout = common::AudioChannel::Layout::LayoutMono;
 				break;
 
 			case 2:
 				_channels = channels;
-				_channel_layout = MediaCommonType::AudioChannel::Layout::LayoutStereo;
+				_channel_layout = common::AudioChannel::Layout::LayoutStereo;
 				break;
 		}
 	}
 
-	MediaCommonType::AudioChannel::Layout GetChannelLayout() const
+	common::AudioChannel::Layout GetChannelLayout() const
 	{
 		return _channel_layout;
 	}
 
-	void SetChannelLayout(MediaCommonType::AudioChannel::Layout channel_layout)
+	void SetChannelLayout(common::AudioChannel::Layout channel_layout)
 	{
 		switch(channel_layout)
 		{
-			case MediaCommonType::AudioChannel::Layout::LayoutMono:
+			case common::AudioChannel::Layout::LayoutMono:
 				_channel_layout = channel_layout;
 				_channels = 1;
 				break;
 
-			case MediaCommonType::AudioChannel::Layout::LayoutStereo:
+			case common::AudioChannel::Layout::LayoutStereo:
 				_channel_layout = channel_layout;
 				_channels = 2;
 				break;
@@ -399,6 +424,47 @@ public:
 		return _flags;
 	}
 
+	// This function should only be called before filtering (_track_id 0, 1)
+	std::unique_ptr<MediaFrame> CloneFrame()
+	{
+		auto frame = std::make_unique<MediaFrame>();
+
+		if(_track_id == (int32_t)common::MediaType::Video)
+		{
+			frame->SetWidth(_width);
+			frame->SetHeight(_height);
+			frame->SetFormat(_format);
+			frame->SetPts(_pts);
+
+			for(int i = 0; i < 3; ++i)
+			{
+				frame->SetStride(GetStride(i), i);
+				frame->SetBuffer(GetBuffer(i), GetDataSize(i), i);
+			}
+		}
+		else if(_track_id == (int32_t)common::MediaType::Audio)
+		{
+			frame->SetFormat(_format);
+			frame->SetBytesPerSample(_bytes_per_sample);
+			frame->SetNbSamples(_nb_samples);
+			frame->SetChannels(_channels);
+			frame->SetSampleRate(_sample_rate);
+			frame->SetChannelLayout(_channel_layout);
+			frame->SetPts(_pts);
+
+			for(int i = 0; i < _channels; ++i)
+			{
+				frame->SetBuffer(GetBuffer(i), GetDataSize(i), i);
+			}
+		}
+		else
+		{
+			OV_ASSERT2(false);
+			return nullptr;
+		}
+		return frame;
+	}
+
 private:
 	const std::vector<uint8_t> *GetPlainData(int32_t plane) const
 	{
@@ -416,7 +482,7 @@ private:
 	std::map<int32_t, std::vector<uint8_t>> _data_buffer;
 
 	// 미디어 타입
-	MediaCommonType::MediaType _media_type = MediaCommonType::MediaType::Unknown;
+	common::MediaType _media_type = common::MediaType::Unknown;
 
 	// 트랙 아이디
 	int32_t _track_id = 0;
@@ -436,7 +502,7 @@ private:
 	int32_t _bytes_per_sample = 0;
 	int32_t _nb_samples = 0;
 	int32_t _channels = 0;
-	MediaCommonType::AudioChannel::Layout _channel_layout = MediaCommonType::AudioChannel::Layout::LayoutMono;
+	common::AudioChannel::Layout _channel_layout = common::AudioChannel::Layout::LayoutMono;
 	int32_t _sample_rate = 0;
 
 	int32_t _flags = 0;    // Key, non-Key

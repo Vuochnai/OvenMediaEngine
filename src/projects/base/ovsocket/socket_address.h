@@ -9,6 +9,7 @@
 #pragma once
 
 #include "./socket_datastructure.h"
+#include "./socket_utilities.h"
 
 #include "../ovlibrary/string.h"
 
@@ -23,6 +24,10 @@ namespace ov
 
 		// any ip (binding 할 때 사용)
 		explicit SocketAddress(uint16_t port);
+
+		// <host>:<port> 형태의 문자열
+		// 예) 1.1.1.1:1234, 192.168.0.1:3030
+		explicit SocketAddress(const ov::String &host_port);
 
 		explicit SocketAddress(const ov::String &hostname, uint16_t port);
 		explicit SocketAddress(const char *hostname, uint16_t port);

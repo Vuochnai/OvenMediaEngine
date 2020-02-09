@@ -40,17 +40,14 @@ BitstreamToADTS::AacProfile BitstreamToADTS::codec_aac_rtmp2ts(AacObjectType obj
 	}
 }
 
-void BitstreamToADTS::convert_to(MediaPacket *packet)
+void BitstreamToADTS::convert_to(const std::shared_ptr<ov::Data> &data)
 {
-	auto &data = packet->GetData();
-
 	if(data->GetLength() == 0)
 	{
 		return;
 	}
 
 	uint8_t *pbuf = data->GetWritableDataAs<uint8_t>();
-	int32_t pbuf_len = static_cast<int32_t>(data->GetLength());
 
 	// 만약, ADTS 타입이면  그냥 종료함.
 	if(pbuf[0] == 0xff)
@@ -58,8 +55,6 @@ void BitstreamToADTS::convert_to(MediaPacket *packet)
 		logtd("already ADTS type");
 		return;
 	}
-
-	// logtd("%s", ov::Dump(pbuf, pbuf_len).CStr());
 
 	uint8_t sound_format = pbuf[0];
 
@@ -163,6 +158,30 @@ void BitstreamToADTS::convert_to(MediaPacket *packet)
 
 		data->Insert(aac_fixed_header, 0, sizeof(aac_fixed_header));
 	}
+}
 
-	// Utils::Debug::DumpHex(pbuf, pbuf_len);
+//====================================================================================================
+// BitstreamSequenceInfoParsing
+// - Bitstream(Rtmp Input Low Data) Sequence Info Parsing
+//====================================================================================================
+bool BitstreamToADTS::SequenceHeaderParsing(const uint8_t *data,
+											 int data_size,
+											 int &sample_index,
+											 int &channels)
+{
+	if(data_size < 4)
+	{
+		return false;
+	}
+
+	if(((data[0] >> 4) & 0x0f) != AudioCodecIdAAC || data[1] != CodecAudioTypeSequenceHeader)
+	{
+		return false;
+	}
+
+	channels = (data[3] >> 3) & 0x0f;
+	sample_index = ((data[2] << 1) & 0x0e) | ((data[3] >> 7) & 0x01);
+	//aac_type = (AacObjectType)((data[2] >> 3) & 0x1f);
+
+	return true;
 }

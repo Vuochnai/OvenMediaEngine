@@ -14,13 +14,7 @@ namespace ov
 	class Singleton
 	{
 	public:
-		explicit Singleton()
-		{
-		}
-
-		virtual ~Singleton()
-		{
-		}
+		virtual ~Singleton() = default;
 
 		static T *Instance()
 		{
@@ -28,6 +22,8 @@ namespace ov
 
 			return &instance;
 		}
-	};
 
+	protected:
+		Singleton() = default;
+	};
 }

@@ -13,6 +13,9 @@ struct OpusEncoder;
 class OvenCodecImplAvcodecEncOpus : public TranscodeEncoder
 {
 public:
+
+	~OvenCodecImplAvcodecEncOpus() override;
+
 	AVCodecID GetCodecID() const noexcept override
 	{
 		return AV_CODEC_ID_OPUS;
@@ -27,7 +30,7 @@ public:
 protected:
 	std::shared_ptr<ov::Data> _buffer;
 
-	MediaCommonType::AudioSample::Format _format;
+	common::AudioSample::Format _format;
 	int64_t _current_pts;
 
 	OpusEncoder *_encoder;

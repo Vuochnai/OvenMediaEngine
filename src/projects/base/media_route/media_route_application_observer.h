@@ -7,7 +7,6 @@
 
 #include "base/ovlibrary/enable_shared_from_this.h"
 #include "base/application/stream_info.h"
-#include "base/application/application_info.h"
 
 #include "media_route_interface.h"
 #include "media_route_application_interface.h"
@@ -18,7 +17,8 @@ public:
 	enum class ObserverType : int8_t
 	{
 		Publisher = 0,
-		Transcoder
+		Transcoder,
+		Relay
 	};
 	////////////////////////////////////////////////////////////////////////////////////////////////
 	// 인터페이스

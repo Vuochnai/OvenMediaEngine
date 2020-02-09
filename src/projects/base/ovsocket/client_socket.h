@@ -12,14 +12,14 @@
 
 namespace ov
 {
-	// 일반적으로 사용되는 소켓 (client socket)
+	// 일반적으로 사용되는 소켓 (server에서 생성한 client socket)
 	class ClientSocket : public Socket
 	{
 	public:
 		friend class ServerSocket;
 
 		ClientSocket();
-		ClientSocket(SocketType type, socket_t socket, const sockaddr_in &remote_addr_in);
+		ClientSocket(SocketWrapper socket, const SocketAddress &remote_address);
 
 		~ClientSocket() override = default;
 

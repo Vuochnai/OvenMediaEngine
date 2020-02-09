@@ -47,7 +47,7 @@ namespace ov
 	};
 
 	// TlsUniquePtr is like the unique_ptr, it was created to support custom deleter which has return values
-	template<typename Ttype, typename Treturn = void, Treturn (*delete_function)(Ttype *argument) = nullptr>
+	template<typename Ttype, typename Treturn, Treturn (*delete_function)(Ttype *argument)>
 	class TlsUniquePtr
 	{
 	public:
@@ -104,10 +104,7 @@ namespace ov
 	private:
 		static void Deleter(Ttype *variable)
 		{
-			if(delete_function != nullptr)
-			{
-				delete_function(variable);
-			}
+			delete_function(variable);
 		}
 
 		std::unique_ptr<Ttype, decltype(&Deleter)> _ptr;
@@ -120,7 +117,7 @@ namespace ov
 		virtual ~Tls();
 
 		// method: DTLS_server_method(), TLS_server_method()
-		bool Initialize(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const ov::String &cipher_list, TlsCallback callback);
+		bool Initialize(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const std::shared_ptr<Certificate> &chain_certificate, const ov::String &cipher_list, TlsCallback callback);
 
 		// @return Returns SSL_ERROR_NONE on success
 		int Accept();
@@ -143,7 +140,7 @@ namespace ov
 
 		void SetVerify(int flags);
 
-		std::shared_ptr<Certificate> GetPeerCertificate();
+		std::shared_ptr<Certificate> GetPeerCertificate() const;
 		bool ExportKeyingMaterial(unsigned long crypto_suite, const ov::String &label, std::shared_ptr<ov::Data> &server_key, std::shared_ptr<ov::Data> &client_key);
 
 		// APIs related to SRTP
@@ -154,7 +151,7 @@ namespace ov
 	protected:
 		static BIO_METHOD *PrepareBioMethod();
 
-		bool PrepareSslContext(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const ov::String &cipher_list);
+		bool PrepareSslContext(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const std::shared_ptr<Certificate> &chain_certificate, const ov::String &cipher_list);
 		bool PrepareBio();
 		bool PrepareSsl(void *app_data);
 

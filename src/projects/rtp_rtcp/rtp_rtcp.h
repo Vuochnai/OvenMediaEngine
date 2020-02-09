@@ -1,38 +1,37 @@
 #pragma once
 
 #include "rtp_rtcp_defines.h"
-#include "rtp_sender.h"
-#include <base/publisher/session_node.h>
+#include "rtp_packetizer.h"
+#include "../base/publisher/session_node.h"
 #include <memory>
 #include <vector>
+#include <map>
+#include "rtcp_packet.h"
 
-class RtpRtcp : public SessionNode, public RtpRtcpSession
+struct RtcpInfo
+{
+    RtcpInfo(uint32_t ssrc_)
+    {
+        ssrc = ssrc_;
+        sequence_number = 0;
+    }
+
+    uint32_t ssrc = 0;
+    uint32_t sequence_number = 0;
+    // uint32_t rtp_packet_size = 0;
+    // time_t rtp_packt_send_time = time(nullptr);
+    // uint32_t rtp_packt_timestamp = 0;
+ };
+
+class RtpRtcp : public SessionNode
 {
 public:
-	RtpRtcp(uint32_t id, std::shared_ptr<Session> session, bool audio);
+	RtpRtcp(uint32_t id, std::shared_ptr<Session> session, const std::vector<uint32_t> &ssrc_list);
+
 	~RtpRtcp() override;
 
-	void Initialize();
-
-	// Payload Type을 설정한다.
-	void SetPayloadType(uint8_t payload_type);
-	// SSRC를 설정한다.
-	void SetSSRC(uint32_t ssrc);
-	// CSRC를 설정한다.
-	void SetCsrcs(const std::vector<uint32_t> &csrcs);
-
-	// Frame을 전송한다.
-	bool SendOutgoingData(FrameType frame_type,
-	                      uint32_t time_stamp,
-	                      const uint8_t *payload_data,
-	                      size_t payload_size,
-	                      const FragmentationHeader *fragmentation,
-	                      const RTPVideoHeader *rtp_video_header);
-
-	// RtpRtcpSession Implementation
-	// RtpSender, RtcpSender 등에 RtpRtcpSession을 넘겨서 전송 이 함수를 통해 하도록 한다.
-	bool SendRtpToNetwork(std::unique_ptr<RtpPacket> packet) override;
-	bool SendRtcpToNetwork(std::unique_ptr<RtcpPacket> packet) override;
+	// 패킷을 전송한다. 성능을 위해 상위에서 Packetizing을 하는 경우 사용한다.
+	bool SendOutgoingData(std::shared_ptr<ov::Data> packet);
 
 	// Implement SessionNode Interface
 	// RtpRtcp는 최상위 노드로 SendData를 사용하지 않는다. SendOutgoingData를 사용한다.
@@ -40,11 +39,14 @@ public:
 	// Lower Node(SRTP)로부터 데이터를 받는다.
 	bool OnDataReceived(SessionNodeType from_node, const std::shared_ptr<const ov::Data> &data) override;
 
-
+	bool RtcpPacketProcess(RtcpPacketType packet_type,
+                            uint32_t payload_size,
+                            int report_count,
+                            const std::shared_ptr<const ov::Data> &data);
 private:
-	bool _audio_session_flag;
-	std::unique_ptr<RTPSender> _rtp_sender;
-	//TODO: RTCP는 향후 구현
-	//RTCPSender				_rtcp_sender;
-	//RTCPReceiver				_rtcp_receiver;
+    time_t _first_receiver_report_time = 0; // 0 - not received RR packet
+
+    time_t _last_sender_report_time = 0;
+    uint64_t _send_packet_sequence_number = 0;
+    std::vector<std::shared_ptr<RtcpInfo>> _rtcp_infos;
 };

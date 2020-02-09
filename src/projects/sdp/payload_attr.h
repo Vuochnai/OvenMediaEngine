@@ -39,9 +39,7 @@ public:
 	void SetId(uint8_t id);
 	uint8_t GetId();
 
-	// a=rtpmap:97 VP8/50000
-	void SetRtpmap(const SupportCodec codec, uint32_t rate, const ov::String &parameters = "");
-	bool SetRtpmap(const ov::String &codec, uint32_t rate, const ov::String &parameters = "");
+	void SetRtpmap(const uint8_t payload_type, const ov::String &codec, uint32_t rate, const ov::String &parameters = "");
 	const SupportCodec GetCodec();
 	const ov::String GetCodecStr();
 	const uint32_t GetCodecRate();
@@ -52,6 +50,10 @@ public:
 	void EnableRtcpFb(const RtcpFbType &type, bool on);
 	bool IsRtcpFbEnabled(const RtcpFbType &type);
 
+	// a=fmtp:111 maxplaybackrate=16000; useinbandfec=1; maxaveragebitrate=20000
+	void SetFmtp(const ov::String &fmtp);
+	ov::String GetFmtp() const;
+
 private:
 	uint8_t _id;
 	SupportCodec _codec;
@@ -60,4 +62,6 @@ private:
 	ov::String _codec_param;
 
 	bool _rtcpfb_support_flag[(int)(RtcpFbType::NumberOfRtcpFbType)];
+
+	ov::String _fmtp;
 };

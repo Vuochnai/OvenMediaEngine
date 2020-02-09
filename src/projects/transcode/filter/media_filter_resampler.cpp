@@ -45,6 +45,11 @@ MediaFilterResampler::~MediaFilterResampler()
 	{
 		avfilter_inout_free(&_inputs);
 	}
+
+	if(_filter_graph)
+	{
+		avfilter_graph_free(&_filter_graph);
+	}
 }
 
 bool MediaFilterResampler::Configure(std::shared_ptr<MediaTrack> input_media_track, std::shared_ptr<TranscodeContext> context)
@@ -80,11 +85,12 @@ bool MediaFilterResampler::Configure(std::shared_ptr<MediaTrack> input_media_tra
 	ov::String output_filter_descr;
 
 	output_filter_descr.Format(
-		"aresample=%d,aformat=sample_fmts=%s:channel_layouts=%s,asettb=expr=%f",
+		"aresample=%d,asetnsamples=n=1024,aformat=sample_fmts=%s:channel_layouts=%s,asettb=expr=%f",
+		//"aresample=%d,aformat=sample_fmts=%s:channel_layouts=%s,asettb=expr=%f",
 		context->GetAudioSampleRate(),
 		context->GetAudioSample().GetName(),
 		context->GetAudioChannel().GetName(),
-		context->GetVideoTimeBase().GetExpr()
+		context->GetTimeBase().GetExpr()
 	);
 
 	logtd("resample. track[%u] %s -> %s", input_media_track->GetId(), input_formats.CStr(), output_filter_descr.CStr());
@@ -164,7 +170,7 @@ bool MediaFilterResampler::Configure(std::shared_ptr<MediaTrack> input_media_tra
 
 int32_t MediaFilterResampler::SendBuffer(std::unique_ptr<MediaFrame> buffer)
 {
-	logd("Resampler.Packet", "Data before resampling:\n%s", ov::Dump(buffer->GetBuffer(0), buffer->GetBufferSize(0), 32).CStr());
+	logtp("Data before resampling:\n%s", ov::Dump(buffer->GetBuffer(0), buffer->GetBufferSize(0), 32).CStr());
 
 	_input_buffer.push_back(std::move(buffer));
 
@@ -200,7 +206,7 @@ std::unique_ptr<MediaFrame> MediaFilterResampler::RecvBuffer(TranscodeResult *re
 		output_frame->SetNbSamples(_frame->nb_samples);
 		output_frame->SetChannels(_frame->channels);
 		output_frame->SetSampleRate(_frame->sample_rate);
-		output_frame->SetChannelLayout((MediaCommonType::AudioChannel::Layout)_frame->channel_layout);
+		output_frame->SetChannelLayout((common::AudioChannel::Layout)_frame->channel_layout);
 
 		output_frame->SetPts((_frame->pts == AV_NOPTS_VALUE) ? -1L : _frame->pts);
 
@@ -223,7 +229,7 @@ std::unique_ptr<MediaFrame> MediaFilterResampler::RecvBuffer(TranscodeResult *re
 			output_frame->AppendBuffer(_frame->data[0], data_length * _frame->channels, 0);
 		}
 
-		logd("Resampler.Packet", "Resampled data:\n%s", ov::Dump(_frame->data[0], _frame->linesize[0], 32).CStr());
+		logtp("Resampled data:\n%s", ov::Dump(_frame->data[0], _frame->linesize[0], 32).CStr());
 
 		av_frame_unref(_frame);
 
@@ -236,7 +242,7 @@ std::unique_ptr<MediaFrame> MediaFilterResampler::RecvBuffer(TranscodeResult *re
 	{
 		MediaFrame *frame = _input_buffer[0].get();
 
-		logd("Resampler.Packet", "Dequeued data for resampling:\n%s", ov::Dump(frame->GetBuffer(0), frame->GetBufferSize(0), 32).CStr());
+		logtp("Dequeued data for resampling:\n%s", ov::Dump(frame->GetBuffer(0), frame->GetBufferSize(0), 32).CStr());
 
 		// ** 오디오 프레임에 들어갈 필수 항목
 		_frame->nb_samples = frame->GetNbSamples();
@@ -263,8 +269,6 @@ std::unique_ptr<MediaFrame> MediaFilterResampler::RecvBuffer(TranscodeResult *re
 			return nullptr;
 		}
 
-		int bytes_per_sample = av_get_bytes_per_sample(static_cast<AVSampleFormat>(_frame->format));
-
 		// Copy data into frame
 		if(IsPlanar(frame->GetFormat<AVSampleFormat>()))
 		{
@@ -288,7 +292,7 @@ std::unique_ptr<MediaFrame> MediaFilterResampler::RecvBuffer(TranscodeResult *re
 		// Copy packet data into frame
 		if(av_buffersrc_add_frame_flags(_buffersrc_ctx, _frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
 		{
-			logte("Error while feeding the audio filtergraph. frame.format(%d), buffer.pts(%.0f) buffer.linesize(%d), buf.size(%d)", _frame->format, (double)_frame->pts, _frame->linesize[0], _input_buffer.size());
+			logte("Error while feeding the audio filtergraph. frame.format(%d), buffer.pts(%lld) buffer.linesize(%d), buf.size(%d)", _frame->format, _frame->pts, _frame->linesize[0], _input_buffer.size());
 		}
 
 		// 처리가 완료된 패킷은 큐에서 삭제함.

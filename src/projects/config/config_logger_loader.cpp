@@ -49,13 +49,20 @@ bool ConfigLoggerLoader::Parse()
 
     // Parse Tag
     std::shared_ptr<LoggerTagInfo> tag_info;
-    for(tag_node; tag_node; tag_node = tag_node.next_sibling())
+    for(; tag_node; tag_node = tag_node.next_sibling())
     {
         tag_info = ParseTag(tag_node);
         if(tag_info != nullptr)
         {
             _tags.push_back(tag_info);
         }
+    }
+
+    _log_path = logger_node.child_value("Path");
+
+    if (strlen(logger_node.attribute("version").value()) != 0)
+    {
+        _version = logger_node.attribute("version").value();
     }
 
     return true;
@@ -71,6 +78,16 @@ void ConfigLoggerLoader::Reset()
 std::vector<std::shared_ptr<LoggerTagInfo>> ConfigLoggerLoader::GetTags() const noexcept
 {
     return _tags;
+}
+
+std::string ConfigLoggerLoader::GetLogPath() const noexcept
+{
+    return _log_path;
+}
+
+std::string ConfigLoggerLoader::GetVersion() const noexcept
+{
+    return _version;
 }
 
 std::shared_ptr<LoggerTagInfo> ParseTag(pugi::xml_node tag_node)

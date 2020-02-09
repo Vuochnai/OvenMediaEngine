@@ -54,24 +54,50 @@ bool CommonAttr::ParsingCommonAttrLine(char type, std::string content)
 	std::smatch matches;
 
 	// a=fingerprint:sha-256 D7:81:CF:01:46:FB:2D
-	if(std::regex_search(content, matches, std::regex("^fingerprint:(\\S*) (\\S*)")))
+	if(content.compare(0, OV_COUNTOF("fi") - 1, "fi") == 0)
 	{
-		_fingerprint_algorithm = std::string(matches[1]).c_str();
-		_fingerprint_value = std::string(matches[2]).c_str();
+		if(std::regex_search(content, matches, std::regex("^fingerprint:(\\S*) (\\S*)")))
+		{
+			_fingerprint_algorithm = std::string(matches[1]).c_str();
+			_fingerprint_value = std::string(matches[2]).c_str();
+		}
 	}
 		// a=ice-options:trickle
-	else if(std::regex_search(content, matches, std::regex("^ice-options:(\\S*)")))
+	else if(content.compare(0, OV_COUNTOF("ice-o") - 1, "ice-o") == 0)
 	{
-		_ice_option = std::string(matches[1]).c_str();
+		if(std::regex_search(content, matches, std::regex("^ice-options:(\\S*)")))
+		{
+			_ice_option = std::string(matches[1]).c_str();
+		}
 	}
 		// a=ice-ufrag:0dfa46c9
-	else if(std::regex_search(content, matches, std::regex("^ice-ufrag:(\\S*)")))
+	else if(content.compare(0, OV_COUNTOF("ice-u") - 1, "ice-u") == 0)
 	{
-		_ice_ufrag = std::string(matches[1]).c_str();
+		if(std::regex_search(content, matches, std::regex("^ice-ufrag:(\\S*)")))
+		{
+			_ice_ufrag = std::string(matches[1]).c_str();
+		}
 	}
-	else if(std::regex_search(content, matches, std::regex("^ice-pwd:(\\S*)")))
+	else if(content.compare(0, OV_COUNTOF("ice-p") - 1, "ice-p") == 0)
 	{
-		_ice_pwd = std::string(matches[1]).c_str();
+		if(std::regex_search(content, matches, std::regex("^ice-pwd:(\\S*)")))
+		{
+			_ice_pwd = std::string(matches[1]).c_str();
+		}
+	}
+	else if(content.compare(0, OV_COUNTOF("fmtp") - 1, "fmtp") == 0)
+	{
+		if(std::regex_search(content, matches, std::regex("fmtp:(\\d*) (.*)profile-level-id=(.*)")))
+		{
+			// a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f
+		}
+	}
+	else if(content.compare(0, OV_COUNTOF("rtcp:") - 1, "rtcp:") == 0)
+	{
+		if(std::regex_search(content, matches, std::regex("rtcp:(\\d*) IN (.*)")))
+		{
+			// a=rtcp:9 IN IP4 0.0.0.0
+		}
 	}
 	else
 	{

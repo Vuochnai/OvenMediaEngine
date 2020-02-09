@@ -16,7 +16,7 @@ class HttpRequest : public ov::EnableSharedFromThis<HttpRequest>
 public:
 	friend class HttpRequestInterceptor;
 
-	HttpRequest(const std::shared_ptr<HttpRequestInterceptor> &interceptor);
+	HttpRequest(const std::shared_ptr<HttpRequestInterceptor> &interceptor, std::shared_ptr<ov::ClientSocket> remote);
 	~HttpRequest() override = default;
 
 	/// HttpRequest 객체 초기화를 위해, client에서 보낸 데이터를 처리함
@@ -77,28 +77,27 @@ public:
 		return _content_length;
 	}
 
+	std::shared_ptr<const ov::Data> GetRequestBody() const
+	{
+		return _request_body;
+	}
+
 	const std::map<ov::String, ov::String, ov::CaseInsensitiveComparator> &GetRequestHeader() const noexcept
 	{
 		return _request_header;
 	}
 
-	const ov::String &GetHeader(const ov::String &key) const noexcept;
-	const ov::String &GetHeader(const ov::String &key, const ov::String &default_value) const noexcept;
+	ov::String GetHeader(const ov::String &key) const noexcept;
+	ov::String GetHeader(const ov::String &key, ov::String default_value) const noexcept;
 	const bool IsHeaderExists(const ov::String &key) const noexcept;
 
-	std::shared_ptr<HttpResponse> &GetHttpResponse() noexcept
+	HttpResponse *GetHttpResponse() noexcept
 	{
 		return _response;
 	}
 
 	bool SetRequestInterceptor(const std::shared_ptr<HttpRequestInterceptor> &interceptor) noexcept
 	{
-		if(interceptor == nullptr)
-		{
-			OV_ASSERT2(false);
-			return false;
-		}
-
 		_interceptor = interceptor;
 		return true;
 	}
@@ -108,16 +107,37 @@ public:
 		return _interceptor;
 	}
 
+	std::shared_ptr<ov::ClientSocket> GetRemote()
+	{
+		return _remote;
+	}
+
+	std::shared_ptr<void> GetExtra() const
+	{
+		return _extra;
+	}
+
+	template<typename T>
+	std::shared_ptr<T> GetExtraAs() const
+	{
+		return std::static_pointer_cast<T>(_extra);
+	}
+
+	void SetExtra(std::shared_ptr<void> extra)
+	{
+		_extra = std::move(extra);
+	}
+
 	ov::String ToString() const;
 
 protected:
-	void SetResponse(const std::shared_ptr<HttpResponse> &response)
+	void SetResponse(HttpResponse *response)
 	{
 		_response = response;
 	}
 
 	// HttpRequestInterceptorInterface를 통해, 다른 interceptor에서 사용됨
-	const std::shared_ptr<ov::Data> &GetRequestBody()
+	const std::shared_ptr<ov::Data> &GetRequestBodyInternal()
 	{
 		if(_request_body == nullptr)
 		{
@@ -135,6 +155,7 @@ protected:
 
 	// request 처리를 담당하는 객체
 	std::shared_ptr<HttpRequestInterceptor> _interceptor = nullptr;
+	std::shared_ptr<ov::ClientSocket> _remote = nullptr;
 
 	HttpStatusCode _parse_status = HttpStatusCode::PartialContent;
 
@@ -155,5 +176,7 @@ protected:
 	// HTTP body
 	std::shared_ptr<ov::Data> _request_body = nullptr;
 
-	std::shared_ptr<HttpResponse> _response = nullptr;
+	HttpResponse *_response = nullptr;
+
+	std::shared_ptr<void> _extra = nullptr;
 };

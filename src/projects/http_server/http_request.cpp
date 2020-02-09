@@ -12,8 +12,9 @@
 
 #include <algorithm>
 
-HttpRequest::HttpRequest(const std::shared_ptr<HttpRequestInterceptor> &interceptor)
-	: _interceptor(interceptor)
+HttpRequest::HttpRequest(const std::shared_ptr<HttpRequestInterceptor> &interceptor, std::shared_ptr<ov::ClientSocket> remote)
+	: _interceptor(interceptor),
+	  _remote(std::move(remote))
 {
 }
 
@@ -133,7 +134,7 @@ HttpStatusCode HttpRequest::ParseRequestLine(const ov::String &line)
 	_method = HttpMethod::Unknown;
 
 	// RFC7231 - 4. Request Methods
-	ov::String method = line.Left(first_space_index);
+	ov::String method = line.Left(static_cast<size_t>(first_space_index));
 
 	HTTP_COMPARE_METHOD("GET", HttpMethod::Get);
 	HTTP_COMPARE_METHOD("HEAD", HttpMethod::Head);
@@ -155,7 +156,7 @@ HttpStatusCode HttpRequest::ParseRequestLine(const ov::String &line)
 	//            / absolute-form
 	//            / authority-form
 	//            / asterisk-form
-	_request_target = line.Substring(first_space_index + 1, last_space_index - first_space_index - 1);
+	_request_target = line.Substring(first_space_index + 1, static_cast<size_t>(last_space_index - first_space_index - 1));
 
 	// RFC7230 - 2.6. Protocol Versioning
 	// HTTP-version  = HTTP-name "/" DIGIT "." DIGIT
@@ -200,7 +201,8 @@ HttpStatusCode HttpRequest::ParseHeader(const ov::String &line)
 		return HttpStatusCode::BadRequest;
 	}
 
-	ov::String field_name = line.Left(colon_index);
+	// 모든 헤더 이름은 대문자로 처리
+	ov::String field_name = line.Left(static_cast<size_t>(colon_index)).UpperCaseString();
 	// 처리를 용이하게 하기 위해 OWS(optional white space) 없앰
 	ov::String field_value = line.Substring(colon_index + 1).Trim();
 
@@ -209,18 +211,18 @@ HttpStatusCode HttpRequest::ParseHeader(const ov::String &line)
 	return HttpStatusCode::OK;
 }
 
-const ov::String &HttpRequest::GetHeader(const ov::String &key) const noexcept
+ov::String HttpRequest::GetHeader(const ov::String &key) const noexcept
 {
 	return GetHeader(key, "");
 }
 
-const ov::String &HttpRequest::GetHeader(const ov::String &key, const ov::String &default_value) const noexcept
+ov::String HttpRequest::GetHeader(const ov::String &key, ov::String default_value) const noexcept
 {
-	auto item = _request_header.find(key);
+	auto item = _request_header.find(key.UpperCaseString());
 
 	if(item == _request_header.cend())
 	{
-		return default_value;
+		return std::move(default_value);
 	}
 
 	return item->second;

@@ -8,41 +8,56 @@
 //==============================================================================
 #pragma once
 
-#include "config_server_loader.h"
-#include "config_application_loader.h"
+#include "items/items.h"
 
-#include <base/ovlibrary/ovlibrary.h>
-
-class ConfigManager : public ov::Singleton<ConfigManager>
+namespace cfg
 {
-public:
-    friend class ov::Singleton<ConfigManager>;
+	class ConfigManager : public ov::Singleton<ConfigManager>
+	{
+	public:
+		friend class ov::Singleton<ConfigManager>;
+		~ConfigManager() override;
 
-    virtual ~ConfigManager();
+		bool LoadConfigs(ov::String config_path);
+		// Load configs from default path (<binary_path>/conf/*)
+		bool LoadConfigs();
 
-    bool LoadConfigs();
+		std::shared_ptr<Server> GetServer() noexcept
+		{
+			return _server;
+		}
 
-    std::shared_ptr<ServerInfo> GetServer() const noexcept;
+		//
+		//std::shared_ptr<ServerInfo> GetServer() const noexcept;
+		//
+		//std::vector<std::shared_ptr<HostInfo>> GetHosts() const noexcept;
+		//std::shared_ptr<HostInfo> GetHost(uint32_t id) const noexcept;
+		//
+		//std::shared_ptr<HostInfo> GetHost() const noexcept;
+		//
+		//std::shared_ptr<HostTlsInfo> GetHostTls() const noexcept;
+		//std::shared_ptr<HostProviderInfo> GetHostProvider() const noexcept;
+		//std::shared_ptr<HostPublisherInfo> GetHostPublisher() const noexcept;
+		//
+		//std::vector<std::shared_ptr<ApplicationInfo>> GetApplicationInfos() const noexcept;
+		//std::shared_ptr<ApplicationInfo> GetApplicationInfo(const ov::String &name) const noexcept;
 
-    std::vector<std::shared_ptr<HostInfo>> GetHosts() const noexcept;
-    std::shared_ptr<HostInfo> GetHost(uint32_t id) const noexcept;
+		ov::String ResolveMacros(ov::String string);
 
-    std::shared_ptr<HostInfo> GetHost() const noexcept;
+	protected:
+		ConfigManager();
 
-	std::shared_ptr<HostTlsInfo> GetHostTls() const noexcept;
-    std::shared_ptr<HostProviderInfo> GetHostProvider() const noexcept;
-    std::shared_ptr<HostPublisherInfo> GetHostPublisher() const noexcept;
+		void PrepareMacros();
 
-    std::vector<std::shared_ptr<ApplicationInfo>> GetApplicationInfos() const noexcept;
-	std::shared_ptr<ApplicationInfo> GetApplicationInfo(const ov::String &name) const noexcept;
+		bool LoadLoggerConfig(const ov::String &config_path) noexcept;
 
-protected:
-    ConfigManager();
+		bool IsValidVersion(const std::string& name, const std::string& version);
 
-    void LoadLoggerConfig() noexcept;
-    bool LoadServerConfig() noexcept;
+		std::shared_ptr<Server> _server;
+		std::map<ov::String, ov::String> _macros;
 
-    std::shared_ptr<ServerInfo> _server;
+		timespec _last_modified;
 
-	timespec _last_modified;
-};
+        std::map<std::string, std::vector<std::string>> _supported_xml;
+	};
+}

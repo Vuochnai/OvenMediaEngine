@@ -24,7 +24,10 @@ public:
 	PhysicalPort();
 	virtual ~PhysicalPort();
 
-	bool Create(ov::SocketType type, const ov::SocketAddress &address);
+	bool Create(ov::SocketType type,
+                const ov::SocketAddress &address,
+                int send_buffer_size = 0,
+                int recv_buffer_size = 0);
 
 	bool Close();
 
@@ -41,16 +44,26 @@ public:
 	}
 
 	bool AddObserver(PhysicalPortObserver *observer);
+
 	bool RemoveObserver(PhysicalPortObserver *observer);
 
+	bool DisconnectClient(ov::ClientSocket *client_socket);
+
 protected:
+	bool CreateServerSocket(ov::SocketType type,
+	                        const ov::SocketAddress &address,
+	                        int send_buffer_size,
+                            int recv_buffer_size);
+
+	bool CreateDatagramSocket(ov::SocketType type, const ov::SocketAddress &address);
+
 	std::shared_ptr<PhysicalPort> _self;
 
 	ov::SocketType _type;
 	ov::SocketAddress _address;
 
-	std::shared_ptr<ov::ServerSocket> _tcp_socket;
-	std::shared_ptr<ov::DatagramSocket> _udp_socket;
+	std::shared_ptr<ov::ServerSocket> _server_socket;
+	std::shared_ptr<ov::DatagramSocket> _datagram_socket;
 
 	volatile bool _need_to_stop;
 	std::thread _thread;

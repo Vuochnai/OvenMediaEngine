@@ -12,5 +12,5 @@
 
 const std::shared_ptr<ov::Data> &HttpRequestInterceptor::GetRequestBody(const std::shared_ptr<HttpRequest> &request)
 {
-	return request->GetRequestBody();
+	return request->GetRequestBodyInternal();
 }

@@ -1,3 +1,5 @@
+#include <utility>
+
 #include "rtc_private.h"
 #include "webrtc_publisher.h"
 #include "rtc_stream.h"
@@ -5,21 +7,20 @@
 
 #include "config/config_manager.h"
 
-std::shared_ptr<WebRtcPublisher> WebRtcPublisher::Create(std::shared_ptr<MediaRouteInterface> router)
+std::shared_ptr<WebRtcPublisher> WebRtcPublisher::Create(const info::Application *application_info, std::shared_ptr<MediaRouteInterface> router, std::shared_ptr<MediaRouteApplicationInterface> application)
 {
-	auto webrtc = std::make_shared<WebRtcPublisher>(router);
+	auto webrtc = std::make_shared<WebRtcPublisher>(application_info, router, application);
 
 	// CONFIG을 불러온다.
-	auto application_infos = ConfigManager::Instance()->GetApplicationInfos();
-	webrtc->Start(application_infos);
+	webrtc->Start();
 
 	return webrtc;
 }
 
-WebRtcPublisher::WebRtcPublisher(std::shared_ptr<MediaRouteInterface> router)
-	: Publisher(router)
+WebRtcPublisher::WebRtcPublisher(const info::Application *application_info, std::shared_ptr<MediaRouteInterface> router, std::shared_ptr<MediaRouteApplicationInterface> application)
+	: Publisher(application_info, std::move(router))
 {
-
+	_application = std::move(application);
 }
 
 WebRtcPublisher::~WebRtcPublisher()
@@ -31,42 +32,39 @@ WebRtcPublisher::~WebRtcPublisher()
  * Publisher Implementation
  */
 
-bool WebRtcPublisher::Start(std::vector<std::shared_ptr<ApplicationInfo>> &application_infos)
+bool WebRtcPublisher::Start()
 {
-	// _ice_port 생성
-	ov::SocketType socket_type;
+	// Find WebRTC publisher configuration
+	auto host = _application_info->GetParentAs<cfg::Host>("Host");
+	auto webrtc_publisher = _application_info->GetPublisher<cfg::WebrtcPublisher>();
 
-	if(GetCandidateProto().UpperCaseString() == "UDP")
+	if(webrtc_publisher->IsParsed() == false)
 	{
-		socket_type = ov::SocketType::Udp;
-	}
-	else if(GetCandidateProto().UpperCaseString() == "TCP")
-	{
-		socket_type = ov::SocketType::Tcp;
-	}
-	else
-	{
+		logte("Invalid WebRTC configuration");
 		return false;
 	}
 
-	_ice_port = IcePortManager::Instance()->CreatePort(socket_type, ov::SocketAddress(GetCandidatePort()), IcePortObserver::GetSharedPtr());
-	_signalling = std::make_shared<RtcSignallingServer>();
+	auto webrtc = host->GetPorts().GetWebrtcPort();
 
-	if(_ice_port == nullptr || _signalling == nullptr)
+	_ice_port = IcePortManager::Instance()->CreatePort(webrtc.GetIceCandidates(), IcePortObserver::GetSharedPtr());
+
+	if(_ice_port == nullptr)
 	{
-		// Something wrokng...
-		logte("Failed to start publisher");
+		logte("Cannot initialize ICE Port. Check your ICE configuration");
 		return false;
 	}
-
-	std::shared_ptr<Certificate> certificate = GetCertificate();
 
 	// Signalling에 Observer 연결
+	ov::SocketAddress signalling_address = ov::SocketAddress(host->GetIp(), static_cast<uint16_t>(webrtc.GetSignallingPort()));
+
+	logti("WebRTC Publisher is listening on %s...", signalling_address.ToString().CStr());
+
+	_signalling = std::make_shared<RtcSignallingServer>(_application_info, _application);
 	_signalling->AddObserver(RtcSignallingObserver::GetSharedPtr());
-	_signalling->Start(ov::SocketAddress(GetSignallingPort()), certificate);
+	_signalling->Start(signalling_address);
 
 	// Publisher::Start()에서 Application을 생성한다.
-	return Publisher::Start(application_infos);
+	return Publisher::Start();
 }
 
 bool WebRtcPublisher::Stop()
@@ -77,10 +75,19 @@ bool WebRtcPublisher::Stop()
 	return Publisher::Stop();
 }
 
-// Publisher에서 Application 생성 요청이 온다.
-std::shared_ptr<Application> WebRtcPublisher::OnCreateApplication(const std::shared_ptr<ApplicationInfo> &info)
+//====================================================================================================
+// monitoring data pure virtual function
+// - collections vector must be insert processed
+//====================================================================================================
+bool WebRtcPublisher::GetMonitoringCollectionData(std::vector<std::shared_ptr<MonitoringCollectionData>> &collections)
 {
-	return RtcApplication::Create(info, _ice_port, _signalling);
+	return _signalling->GetMonitoringCollectionData(collections);
+}
+
+// Publisher에서 Application 생성 요청이 온다.
+std::shared_ptr<Application> WebRtcPublisher::OnCreateApplication(const info::Application *application_info)
+{
+	return RtcApplication::Create(application_info, _ice_port, _signalling);
 }
 
 /*
@@ -95,13 +102,14 @@ std::shared_ptr<SessionDescription> WebRtcPublisher::OnRequestOffer(const ov::St
 	auto stream = std::static_pointer_cast<RtcStream>(GetStream(application_name, stream_name));
 	if(!stream)
 	{
-		logte("Get offer sdp failed. Cannot find stream (%s/%s)", application_name.CStr(), stream_name.CStr());
 		return nullptr;
 	}
 
-	ice_candidates->push_back(RtcIceCandidate(GetCandidateProto(), ov::SocketAddress(GetCandidateIP(), GetCandidatePort()), 0, ""));
+	auto &candidates = _ice_port->GetIceCandidateList();
 
-	auto session_description = std::make_shared<SessionDescription>(*stream->GetSessionDescription().get());
+	ice_candidates->insert(ice_candidates->end(), candidates.cbegin(), candidates.cend());
+
+	auto session_description = std::make_shared<SessionDescription>(*stream->GetSessionDescription());
 
 	session_description->SetIceUfrag(_ice_port->GenerateUfrag());
 	session_description->Update();
@@ -115,7 +123,7 @@ bool WebRtcPublisher::OnAddRemoteDescription(const ov::String &application_name,
                                              const std::shared_ptr<SessionDescription> &offer_sdp,
                                              const std::shared_ptr<SessionDescription> &peer_sdp)
 {
-	auto application = GetApplication(application_name);
+	auto application = GetApplicationByName(application_name);
 	auto stream = GetStream(application_name, stream_name);
 
 	if(!stream)
@@ -164,8 +172,7 @@ bool WebRtcPublisher::OnStopCommand(const ov::String &application_name, const ov
 	}
 
 	// Peer SDP의 Session ID로 세션을 찾는다.
-	auto session = stream->FindRtcSessionByPeerSDPSessionID(peer_sdp->GetSessionId());
-
+	auto session = stream->GetSession(peer_sdp->GetSessionId());
 	if(session == nullptr)
 	{
 		logte("To stop session failed. Cannot find session by peer sdp session id (%u)", peer_sdp->GetSessionId());
@@ -180,6 +187,33 @@ bool WebRtcPublisher::OnStopCommand(const ov::String &application_name, const ov
 
 	return true;
 }
+
+// bitrate info(frome signalling)
+uint32_t WebRtcPublisher::OnGetBitrate(const ov::String &application_name, const ov::String &stream_name)
+{
+	auto stream = GetStream(application_name, stream_name);
+	uint32_t bitrate = 0;
+
+	if(!stream)
+	{
+		logte("Cannot find stream (%s/%s)", application_name.CStr(), stream_name.CStr());
+		return 0;
+	}
+
+	auto tracks = stream->GetTracks();
+	for(auto &track_iter : tracks)
+	{
+		MediaTrack *track = track_iter.second.get();
+
+		if(track->GetCodecId() == common::MediaCodecId::Vp8 || track->GetCodecId() == common::MediaCodecId::Opus)
+		{
+			bitrate += track->GetBitrate();
+		}
+	}
+
+	return bitrate;
+}
+
 
 // It does not be used because
 bool WebRtcPublisher::OnIceCandidate(const ov::String &application_name,
@@ -222,6 +256,8 @@ void WebRtcPublisher::OnStateChanged(IcePort &port, const std::shared_ptr<Sessio
 			// Signalling에 종료 명령을 내린다.
 			_signalling->Disconnect(application->GetName(), stream->GetName(), session->GetPeerSDP());
 			break;
+		default:
+			break;
 	}
 }
 
@@ -233,95 +269,4 @@ void WebRtcPublisher::OnDataReceived(IcePort &port, const std::shared_ptr<Sessio
 	//받는 Data 형식을 협의해야 한다.
 	auto application = session->GetApplication();
 	application->PushIncomingPacket(session_info, data);
-}
-
-uint16_t WebRtcPublisher::GetSignallingPort()
-{
-	if(
-		ConfigManager::Instance()->GetHostPublisher() == nullptr ||
-		ConfigManager::Instance()->GetHostPublisher()->GetWebRtcProperties() == nullptr
-		)
-	{
-		logte("Cannot get publish service config");
-
-		// Default Signalling Port
-		return 3333;
-	}
-
-	return static_cast<uint16_t>(ConfigManager::Instance()->GetHostPublisher()->GetWebRtcProperties()->GetSignallingPort());
-}
-
-ov::String WebRtcPublisher::GetCandidateIP()
-{
-	if(
-		ConfigManager::Instance()->GetHostPublisher() == nullptr
-		)
-	{
-		logte("Cannot get publish service config");
-
-		// Default Candidate IP
-		return "127.0.0.1";
-	}
-
-	return ConfigManager::Instance()->GetHostPublisher()->GetIPAddress();
-}
-
-uint16_t WebRtcPublisher::GetCandidatePort()
-{
-	if(
-		ConfigManager::Instance()->GetHostPublisher() == nullptr ||
-		ConfigManager::Instance()->GetHostPublisher()->GetWebRtcProperties() == nullptr
-		)
-	{
-		logte("Cannot get publish service config");
-
-		// Default Candidate Port
-		return 10000;
-	}
-
-	return static_cast<uint16_t>(ConfigManager::Instance()->GetHostPublisher()->GetWebRtcProperties()->GetCandidatePort());
-}
-
-ov::String WebRtcPublisher::GetCandidateProto()
-{
-	if(
-		ConfigManager::Instance()->GetHostPublisher() == nullptr ||
-		ConfigManager::Instance()->GetHostPublisher()->GetWebRtcProperties() == nullptr
-		)
-	{
-		logte("Cannot get publish service config");
-		return "UDP";
-	}
-
-	return ConfigManager::Instance()->GetHostPublisher()->GetWebRtcProperties()->GetCandidateProtocol();
-}
-
-std::shared_ptr<Certificate> WebRtcPublisher::GetCertificate()
-{
-	auto tls_info = ConfigManager::Instance()->GetHostTls();
-
-	if(tls_info->CheckTls())
-	{
-		auto certificate = std::make_shared<Certificate>();
-
-		logti("Trying to create a certificate using file\n\tCert path: %s\n\tPrivate key path: %s",
-		      tls_info->GetCertPath().CStr(),
-		      tls_info->GetKeyPath().CStr()
-		);
-
-		if(certificate->GenerateFromPem(tls_info->GetCertPath(), tls_info->GetKeyPath()))
-		{
-			return certificate;
-		}
-
-		logte("An error occurred while create a certificate");
-	}
-	else
-	{
-		// TLS is disabled
-	}
-
-	return nullptr;
-
-
 }

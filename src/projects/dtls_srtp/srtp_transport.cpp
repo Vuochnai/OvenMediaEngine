@@ -48,6 +48,33 @@ bool SrtpTransport::SendData(SessionNodeType from_node, const std::shared_ptr<ov
 	return node->SendData(GetNodeType(), data);
 }
 
+// srtcp transfer
+bool SrtpTransport::SendRtcpData(SessionNodeType from_node, const std::shared_ptr<ov::Data> &data)
+{
+    if(GetState() != SessionNode::NodeState::Started)
+    {
+        logtd("SessionNode has not started, so the received data has been canceled.");
+        return false;
+    }
+
+    if(!_send_session)
+    {
+        return false;
+    }
+
+    _send_session->ProtectRtcp(data);
+
+    // DTLS transfer
+    auto node = GetLowerNode();
+    if(!node)
+    {
+        return false;
+    }
+     
+    return node->SendData(GetNodeType(), data);
+}
+
+
 // 데이터를 lower(DTLS)에서 받는다. upper node(RTP_RTCP)로 보낸다.
 bool SrtpTransport::OnDataReceived(SessionNodeType from_node, const std::shared_ptr<const ov::Data> &data)
 {
@@ -57,6 +84,23 @@ bool SrtpTransport::OnDataReceived(SessionNodeType from_node, const std::shared_
 		logtd("SessionNode has not started, so the received data has been canceled.");
 		return false;
 	}
+
+	auto decode_data = data->Clone();
+
+    if(!_recv_session->UnprotectRtcp(decode_data))
+    {
+        logtd("stcp unprotected fail");
+        return false;
+    }
+
+	// pass to rtcp
+    auto node = GetUpperNode();
+
+    if(node == nullptr)
+    {
+        return false;
+    }
+    node->OnDataReceived(GetNodeType(), decode_data);
 
 	return true;
 }

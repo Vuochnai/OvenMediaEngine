@@ -16,7 +16,7 @@ enum class KeyType : int32_t
 	Ecdsa,
 	Last,
 
-	Default = Ecdsa
+	Default = static_cast<int>(Ecdsa)
 };
 
 class Certificate
@@ -26,12 +26,13 @@ public:
 	explicit Certificate(X509 *x509);
 	~Certificate();
 
-	bool Generate();
-	bool GenerateFromPem(ov::String cert_filename, ov::String private_key_filename);
-	bool GenerateFromPem(ov::String filename);
+	std::shared_ptr<ov::Error> Generate();
+	std::shared_ptr<ov::Error> GenerateFromPem(ov::String cert_filename, ov::String private_key_filename);
+	// If aux flag is enabled, it will process a trusted X509 certificate using an X509 structure
+	std::shared_ptr<ov::Error> GenerateFromPem(ov::String filename, bool aux);
 	X509 *GetX509();
 	EVP_PKEY *GetPkey();
-	ov::String GetFingerprint(ov::String algorithm);
+	ov::String GetFingerprint(const ov::String &algorithm);
 
 	// Print Cert for Test
 	void Print();
@@ -42,7 +43,7 @@ private:
 	// Make Self-Signed Certificate
 	X509 *MakeCertificate(EVP_PKEY *pkey);
 	// Make Digest
-	bool ComputeDigest(const ov::String algorithm);
+	bool ComputeDigest(const ov::String &algorithm);
 
 	bool GetDigestEVP(const ov::String &algorithm, const EVP_MD **mdp);
 

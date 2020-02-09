@@ -20,14 +20,48 @@ public:
 	TranscodeContext();
 	~TranscodeContext();
 
+	// Video
+	TranscodeContext(
+		common::MediaCodecId codec_id,
+		int32_t bitrate,
+		uint32_t width,
+		uint32_t height,
+		float frame_rate) : _codec_id(codec_id),
+	                        _bitrate(bitrate),
+	                        _video_width(width),
+	                        _video_height(height),
+	                        _video_frame_rate(frame_rate)
+	{
+		_media_type = common::MediaType::Video;
+		_time_base.Set(1, 1000000);
+		_video_gop = 30;
+	}
+
+	// Audio
+	TranscodeContext(
+		common::MediaCodecId codec_id,
+		int32_t bitrate,
+		int32_t sample) : _codec_id(codec_id),
+	                      _bitrate(bitrate)
+	{
+		_media_type = common::MediaType::Audio;
+		_time_base.Set(1, 1000000);
+		_audio_sample.SetRate((common::AudioSample::Rate)sample);
+		_audio_sample.SetFormat(common::AudioSample::Format::S16);
+		_audio_channel.SetLayout(common::AudioChannel::Layout::LayoutStereo);
+	}
+
 	//--------------------------------------------------------------------
 	// Video transcoding options
 	//--------------------------------------------------------------------
-	void SetVideoCodecId(MediaCommonType::MediaCodecId val);
-	MediaCommonType::MediaCodecId GetVideoCodecId();
+	void SetCodecId(common::MediaCodecId val);
+	common::MediaCodecId GetCodecId();
 
-	void SetVideoBitrate(int32_t val);
-	int32_t GetVideoBitrate();
+	void SetBitrate(int32_t val);
+	int32_t GetBitrate();
+
+	common::Timebase &GetTimeBase();
+	void SetTimeBase(int32_t num, int32_t den);
 
 	void SetVideoWidth(uint32_t val);
 	void SetVideoHeight(uint32_t val);
@@ -35,47 +69,36 @@ public:
 	uint32_t GetVideoWidth();
 	uint32_t GetVideoHeight();
 
-	void SetFrameRate(float val);
-	float GetFrameRate();
-
-	MediaCommonType::Timebase &GetVideoTimeBase();
-	void SetVideoTimeBase(int32_t num, int32_t den);
-
 	void SetGOP(int32_t val);
 	int32_t GetGOP();
 
-	//--------------------------------------------------------------------
-	// Audio transcoding options
-	//--------------------------------------------------------------------
-	void SetAudioCodecId(MediaCommonType::MediaCodecId val);
-	MediaCommonType::MediaCodecId GetAudioCodecId();
+	void SetFrameRate(float val);
+	float GetFrameRate();
 
-	void SetAudioBitrate(int32_t val);
-	int32_t GetAudioBitrate();
-
-	void SetAudioSample(MediaCommonType::AudioSample sample);
-	MediaCommonType::AudioSample GetAudioSample() const;
+	void SetAudioSample(common::AudioSample sample);
+	common::AudioSample GetAudioSample() const;
 
 	void SetAudioSampleRate(int32_t val);
 	int32_t GetAudioSampleRate();
 
-	MediaCommonType::Timebase &GetAudioTimeBase();
+	void SetAudioSampleFormat(common::AudioSample::Format val);
 
-	void SetAudioTimeBase(int32_t num, int32_t den);
+	common::AudioChannel &GetAudioChannel();
+	const common::AudioChannel &GetAudioChannel() const;
 
-	void SetAudioSampleFormat(MediaCommonType::AudioSample::Format val);
-
-	MediaCommonType::AudioChannel &GetAudioChannel();
-	const MediaCommonType::AudioChannel &GetAudioChannel() const;
+	common::MediaType GetMediaType() const;
 
 private:
 	//--------------------------------------------------------------------
 	// Video transcoding options
 	//--------------------------------------------------------------------
-	MediaCommonType::MediaCodecId _video_codec_id;
+	common::MediaCodecId _codec_id;
 
 	// Bitrate
-	int32_t _video_bitrate;
+	int32_t _bitrate;
+
+	// Video timebase
+	common::Timebase _time_base;
 
 	// Resolution
 	uint32_t _video_width;
@@ -87,24 +110,12 @@ private:
 	// GOP : Group Of Picture
 	int32_t _video_gop;
 
-	// Video timebase
-	MediaCommonType::Timebase _video_time_base;
-
-	//--------------------------------------------------------------------
-	// Audio transcoding options
-	//--------------------------------------------------------------------
-	MediaCommonType::MediaCodecId _audio_codec_id;
-
-	// Bitrate
-	int32_t _audio_bitrate;
+	common::MediaType _media_type;
 
 	// Sample type
-	MediaCommonType::AudioSample _audio_sample;
+	common::AudioSample _audio_sample;
 
 	// Channel
-	MediaCommonType::AudioChannel _audio_channel;
-
-	// Audio timebase
-	MediaCommonType::Timebase _audio_time_base;
+	common::AudioChannel _audio_channel;
 };
 

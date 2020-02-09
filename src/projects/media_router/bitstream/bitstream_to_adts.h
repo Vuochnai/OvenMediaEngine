@@ -56,7 +56,12 @@ public:
     BitstreamToADTS();
     ~BitstreamToADTS();
 
- 	void convert_to(MediaPacket *packet);
+ 	void convert_to(const std::shared_ptr<ov::Data> &data);
+
+ 	static bool SequenceHeaderParsing(const uint8_t *data,
+									  int data_size,
+									  int &sample_index,
+									  int &channels);
 private:
 	AacProfile 	codec_aac_rtmp2ts(AacObjectType object_type);
 

@@ -7,211 +7,156 @@
 //
 //==============================================================================
 #include "config_manager.h"
+
+#include "items/items.h"
+
 #include "config_private.h"
+#include "config_logger_loader.h"
 
 #include <iostream>
 
-#include "config_logger_loader.h"
-
-ConfigManager::ConfigManager()
+namespace cfg
 {
-}
-
-ConfigManager::~ConfigManager()
-{
-}
-
-bool ConfigManager::LoadConfigs()
-{
-	// Load Logger
-	LoadLoggerConfig();
-
-	// Load Server config
-	return LoadServerConfig();
-}
-
-std::shared_ptr<ServerInfo> ConfigManager::GetServer() const noexcept
-{
-	return _server;
-}
-
-std::vector<std::shared_ptr<HostInfo>> ConfigManager::GetHosts() const noexcept
-{
-	if(_server == nullptr)
+	ConfigManager::ConfigManager()
 	{
-		return {};
+	    // Modify if supported xml version is added or changed
+        _supported_xml.insert(
+                std::make_pair("Server",std::vector<std::string>({"2", "2.0"}))
+                );
+
+        _supported_xml.insert(
+                std::make_pair("Logger", std::vector<std::string>({"2", "2.0"}))
+                );
 	}
 
-	return _server->GetHosts();
-}
-
-std::shared_ptr<HostInfo> ConfigManager::GetHost(uint32_t id) const noexcept
-{
-	if(_server == nullptr)
+	ConfigManager::~ConfigManager()
 	{
-		return nullptr;
 	}
 
-	std::vector<std::shared_ptr<HostInfo>> hosts = _server->GetHosts();
-
-	for(const auto &host : _server->GetHosts())
+	bool ConfigManager::LoadConfigs(ov::String config_path)
 	{
-		if(host->GetId() == id)
+		if(config_path.IsEmpty())
 		{
-			return host;
+			config_path = ov::PathManager::GetAppPath("conf");
 		}
-	}
 
-	return nullptr;
-}
+		PrepareMacros();
 
-std::shared_ptr<HostInfo> ConfigManager::GetHost() const noexcept
-{
-	if(_server == nullptr)
-	{
-		return nullptr;
-	}
-
-	if(_server->GetHosts().size() == 0)
-	{
-		return nullptr;
-	}
-
-	return _server->GetHosts().front();
-}
-
-std::shared_ptr<HostTlsInfo> ConfigManager::GetHostTls() const noexcept
-{
-	const auto &host = GetHost();
-
-	if(host == nullptr)
-	{
-		return nullptr;
-	}
-
-	return host->GetTls();
-}
-
-std::shared_ptr<HostProviderInfo> ConfigManager::GetHostProvider() const noexcept
-{
-	const auto &host = GetHost();
-
-	if(host == nullptr)
-	{
-		return nullptr;
-	}
-
-	return host->GetProvider();
-}
-
-std::shared_ptr<HostPublisherInfo> ConfigManager::GetHostPublisher() const noexcept
-{
-	const auto &host = GetHost();
-
-	if(host == nullptr)
-	{
-		return nullptr;
-	}
-
-	return host->GetPublisher();
-}
-
-std::vector<std::shared_ptr<ApplicationInfo>> ConfigManager::GetApplicationInfos() const noexcept
-{
-	if(_server == nullptr)
-	{
-		return {};
-	}
-
-	if(_server->GetHosts().size() == 0)
-	{
-		return {};
-	}
-
-	return _server->GetHosts().front()->GetApplications();
-}
-
-std::shared_ptr<ApplicationInfo> ConfigManager::GetApplicationInfo(const ov::String &name) const noexcept
-{
-	auto list = GetApplicationInfos();
-
-	for(auto app_info : list)
-	{
-		if(app_info->GetName() == name)
+		// Load Logger
+		if(LoadLoggerConfig(config_path) == false)
 		{
-			return app_info;
+			return false;
 		}
+
+		ov::String server_config_path = ov::PathManager::Combine(config_path, "Server.xml");
+		logti("Trying to load configurations... (%s)", server_config_path.CStr());
+
+		_server = std::make_shared<cfg::Server>();
+        bool result = _server->Parse(server_config_path, "Server");
+
+        if (IsValidVersion("Server", _server->GetVersion().CStr()) == false)
+        {
+            return false;
+        }
+
+		return result;
 	}
 
-	return nullptr;
-}
-
-bool ConfigManager::LoadServerConfig() noexcept
-{
-	ov::String config_path = ov::PathManager::Combine(ov::PathManager::GetAppPath(), "conf/Server.xml");
-
-	auto server_loader = std::make_shared<ConfigServerLoader>(config_path);
-	if(server_loader == nullptr)
+	bool ConfigManager::LoadConfigs()
 	{
-		logte("Failed to load config Server.xml");
-		return false;
+		return LoadConfigs("");
 	}
 
-	if(!server_loader->Parse())
+	void ConfigManager::PrepareMacros()
 	{
-		// 어플리케이션 정보 로딩이 실패한 경우
-		// TODO: 어떻게 처리할 지 생각해 봐야함
-
-		return false;
+		_macros.clear();
+		_macros["${ome.AppHome}"] = ov::PathManager::GetAppPath();
+		_macros["${ome.CurrentPath}"] = ov::PathManager::GetCurrentPath();
 	}
 
-	_server = server_loader->GetServerInfo();
-
-	server_loader->Reset();
-
-	return true;
-}
-
-void ConfigManager::LoadLoggerConfig() noexcept
-{
-	struct stat value = { 0 };
-
-	ov::String config_path = ov::PathManager::Combine(ov::PathManager::GetAppPath(), "conf/Logger.xml");
-
-	::memset(&_last_modified, 0, sizeof(_last_modified));
-	::stat(config_path, &value);
-
-	if(
-		(_last_modified.tv_sec == value.st_mtim.tv_sec) &&
-		(_last_modified.tv_nsec == value.st_mtim.tv_nsec)
-		)
+	bool ConfigManager::LoadLoggerConfig(const ov::String &config_path) noexcept
 	{
-		// log.config가 변경되지 않음
-		return;
+		struct stat value = { 0 };
+
+		ov::String logger_config_path = ov::PathManager::Combine(config_path, "Logger.xml");
+
+		::memset(&_last_modified, 0, sizeof(_last_modified));
+		::stat(logger_config_path, &value);
+
+		if(
+			(_last_modified.tv_sec == value.st_mtim.tv_sec) &&
+			(_last_modified.tv_nsec == value.st_mtim.tv_nsec)
+			)
+		{
+			// log.config가 변경되지 않음
+			return true;
+		}
+
+		ov_log_reset_enable();
+
+		_last_modified = value.st_mtim;
+
+		auto logger_loader = std::make_shared<ConfigLoggerLoader>(logger_config_path);
+		if(logger_loader == nullptr)
+		{
+			logte("Failed to load config Logger.xml");
+			return false;
+		}
+
+		if(!logger_loader->Parse())
+		{
+			// Logger.xml 파싱에 실패한 경우
+			return false;
+		}
+
+		if (IsValidVersion("Logger", logger_loader->GetVersion().c_str()) == false)
+        {
+		    return false;
+        }
+
+        auto log_path = logger_loader->GetLogPath();
+        ov_log_set_path(log_path.c_str());
+        logti("Trying to save logfile in directory... (%s)", log_path.c_str());
+
+		std::vector<std::shared_ptr<LoggerTagInfo>> tags = logger_loader->GetTags();
+		for(auto iterator = tags.begin(); iterator != tags.end(); ++iterator)
+		{
+			ov_log_set_enable((*iterator)->GetName().CStr(), (*iterator)->GetLevel(), true);
+		}
+
+		logger_loader->Reset();
+		return true;
 	}
 
-	ov_log_reset_enable();
-
-	_last_modified = value.st_mtim;
-
-	auto logger_loader = std::make_shared<ConfigLoggerLoader>(config_path);
-	if(logger_loader == nullptr)
+	ov::String ConfigManager::ResolveMacros(ov::String string)
 	{
-		logte("Failed to load config Logger.xml");
-		return;
+		for(auto macro : _macros)
+		{
+			string = string.Replace(macro.first, macro.second);
+		}
+
+		return string;
 	}
 
-	if(!logger_loader->Parse())
-	{
-		// Logger.xml 파싱에 실패한 경우
-		return;
-	}
+	bool ConfigManager::IsValidVersion(const std::string& name, const std::string& version)
+    {
+        auto supported_xml = _supported_xml.find(name);
+        if(supported_xml == _supported_xml.end())
+        {
+            logte("Cannot find conf XML (%s.xml)", name.c_str());
+            return false;
+        }
 
-	std::vector<std::shared_ptr<LoggerTagInfo>> tags = logger_loader->GetTags();
-	for(auto iterator = tags.begin(); iterator != tags.end(); ++iterator)
-	{
-		ov_log_set_enable((*iterator)->GetName().CStr(), (*iterator)->GetLevel(), true);
-	}
+        auto supported_version = supported_xml->second;
+        if (std::find(supported_version.begin(), supported_version.end(), version) != supported_version.end())
+        {
+            return true;
+        }
 
-	logger_loader->Reset();
+        logte("The version of %s.xml is incorrect. If you have upgraded OME, see misc/conf_examples/%s.xml",
+                name.c_str(),
+                name.c_str());
+
+	    return false;
+    }
 }

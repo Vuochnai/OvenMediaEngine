@@ -9,8 +9,7 @@
 #pragma once
 
 #include "web_socket_frame.h"
-#include "web_socket_request.h"
-#include "web_socket_response.h"
+#include "web_socket_client.h"
 
 #include <http_server/http_server.h>
 
@@ -25,7 +24,7 @@ public:
 	{
 	}
 
-	~WebSocketInterceptor() = default;
+	~WebSocketInterceptor();
 
 	// ws.on('connection');
 	void SetConnectionHandler(WebSocketConnectionHandler handler);
@@ -41,14 +40,16 @@ protected:
 	// Implementation of HttpRequestInterceptorInterface
 	//--------------------------------------------------------------------
 	bool IsInterceptorForRequest(const std::shared_ptr<const HttpRequest> &request, const std::shared_ptr<const HttpResponse> &response) override;
-	void OnHttpPrepare(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response) override;
-	void OnHttpData(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response, const std::shared_ptr<const ov::Data> &data) override;
+
+	// If these handler return false, the connection will be disconnected
+	bool OnHttpPrepare(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response) override;
+	bool OnHttpData(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response, const std::shared_ptr<const ov::Data> &data) override;
 	void OnHttpError(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response, HttpStatusCode status_code) override;
 	void OnHttpClosed(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response) override;
 
 	struct WebSocketInfo
 	{
-		std::shared_ptr<WebSocketResponse> response;
+		std::shared_ptr<WebSocketClient> response;
 		std::shared_ptr<WebSocketFrame> frame;
 	};
 

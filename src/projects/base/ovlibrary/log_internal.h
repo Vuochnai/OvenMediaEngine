@@ -11,6 +11,7 @@
 #include "./string.h"
 #include "./log.h"
 #include "./assert.h"
+#include "./log_write.h"
 
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -26,8 +27,8 @@
 #   define OV_LOG_SHOW_FILE_NAME                1
 #   define OV_LOG_SHOW_FUNCTION_NAME            0
 #else // DEBUG
-#   define OV_LOG_SHOW_FILE_NAME                0
-#   define OV_LOG_SHOW_FUNCTION_NAME            1
+#   define OV_LOG_SHOW_FILE_NAME                1
+#   define OV_LOG_SHOW_FUNCTION_NAME            0
 #endif // DEBUG
 
 #define OV_LOG_COLOR_RESET                      "\x1B[0m"
@@ -88,7 +89,7 @@ namespace ov
 
 		inline void ResetEnable()
 		{
-			std::unique_lock<std::mutex> lock(_mutex);
+			std::lock_guard<std::mutex> lock(_mutex);
 
 			_enable_map.clear();
 
@@ -109,7 +110,7 @@ namespace ov
 		///          예4) level이 info 이면서 is_enabled가 true, debug 로그 출력 안함, information~critical 로그 출력함.
 		inline void SetEnable(const char *tag_regex, OVLogLevel level, bool is_enabled)
 		{
-			std::unique_lock<std::mutex> lock(_mutex);
+			std::lock_guard<std::mutex> lock(_mutex);
 
 			// 캐시 모두 삭제
 			_enable_map.clear();
@@ -128,7 +129,7 @@ namespace ov
 
 		inline bool IsEnabled(const char *tag, OVLogLevel level)
 		{
-			std::unique_lock<std::mutex> lock(_mutex);
+			std::lock_guard<std::mutex> lock(_mutex);
 
 			auto item = _enable_map.find(tag);
 
@@ -149,10 +150,10 @@ namespace ov
 
 				if(item == _enable_map.cend())
 				{
-					// 정규식에 매칭되는 항목이 없다면 debug 이상의 로그 활성화
+					// 정규식에 매칭되는 항목이 없다면 info 이상의 로그 활성화
 					_enable_map[tag] = (EnableItem){
 						.regex = nullptr,
-						.level = OVLogLevelDebug,
+						.level = OVLogLevelInformation,
 						.is_enabled = true
 					};
 				}
@@ -287,14 +288,14 @@ namespace ov
 			           " | "
 			           #if OV_LOG_SHOW_FILE_NAME
 			           // File:Line
-			           "%s:%d | "
+			           "%s:%-4d | "
 #endif // OV_LOG_SHOW_FILE_NAME
 #if OV_LOG_SHOW_FUNCTION_NAME
 			// Method
 				   "%s() | "
 #endif // OV_LOG_SHOW_FUNCTION_NAME
 				,
-				       color_prefix[level],
+				       "",
 #if DEBUG
                        localTime.tm_mon + 1, localTime.tm_mday,
 #else // DEBUG
@@ -316,25 +317,31 @@ namespace ov
 			// 맨 뒤에 <message> 추가
 			log.AppendVFormat(format, &(arg_list[0]));
 
-			log.Append(color_suffix[level]);
-			log.Append("\n");
-
 			if(level < OVLogLevelWarning)
 			{
-				fputs(log.CStr(), stdout);
+                fprintf(stdout, "%s%s%s\n", color_prefix[level], log.CStr(), color_suffix[level]);
 				fflush(stdout);
 			}
 			else
 			{
-				fputs(log.CStr(), stderr);
-				fflush(stderr);
+                fprintf(stderr, "%s%s%s\n", color_prefix[level], log.CStr(), color_suffix[level]);
+                fflush(stderr);
 			}
+
+            _log_file.Write(log.CStr());
 		}
+
+        inline void SetLogPath(const char* log_path)
+        {
+            _log_file.SetLogPath(log_path);
+        }
 
 	protected:
 		OVLogLevel _level;
 
 		std::mutex _mutex;
+
+        LogWrite _log_file;
 
 		struct EnableItem
 		{

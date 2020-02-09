@@ -10,110 +10,178 @@
 
 #define OV_LOG_TAG "TranscodeCodec"
 
-#define DEBUG_PREVIEW 0
-
-bool OvenCodecImplAvcodecDecAVC::Configure(std::shared_ptr<TranscodeContext> context)
-{
-	if(WelsCreateDecoder(&_decoder))
-	{
-		logte("Unable to create H264 decoder");
-		return false;
-	}
-
-	SDecodingParam param = { nullptr };
-	param.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
-	param.eEcActiveIdc = ERROR_CON_DISABLE;
-
-#if !OPENH264_VER_AT_LEAST(1, 6)
-	param.eOutputColorFormat = videoFormatI420;
-#endif
-
-	if(_decoder->Initialize(&param))
-	{
-		logte("H264 decoder initialize failed");
-		WelsDestroyDecoder(_decoder);
-		return false;
-	}
-	_format_changed = true;
-
-	return true;
-}
-
 std::unique_ptr<MediaFrame> OvenCodecImplAvcodecDecAVC::RecvBuffer(TranscodeResult *result)
 {
-	*result = TranscodeResult::NoData;
+	// Check the decoded frame is available
+	int ret = avcodec_receive_frame(_context, _frame);
 
-	std::shared_ptr<const ov::Data> stream_h264 = nullptr;
-	int64_t pts;
-	SBufferInfo info;
-	uint8_t* ptrs[3];
-
-	if(_input_buffer.empty())
+	if(ret == AVERROR(EAGAIN))
 	{
+		// Need more data to decode
+	}
+	else if(ret == AVERROR_EOF)
+	{
+		logtw("Error receiving a packet for decoding : AVERROR_EOF");
+		*result = TranscodeResult::DataError;
 		return nullptr;
 	}
-
-	while(!_input_buffer.empty())
+	else if(ret < 0)
 	{
-		auto packet_buffer = std::move(_input_buffer[0]);
-		_input_buffer.erase(_input_buffer.begin(), _input_buffer.begin() + 1);
+		logte("Error receiving a packet for decoding : %d", ret);
+		*result = TranscodeResult::DataError;
+		return nullptr;
+	}
+	else
+	{
+		bool need_to_change_notify = false;
 
-		const MediaPacket *packet = packet_buffer.get();
-		OV_ASSERT2(packet != nullptr);
-
-		stream_h264 = packet->GetData();
-		pts = packet->GetPts();
-
-		::memset(&info, 0, sizeof(SBufferInfo));
-
-		// DecodeFrameNoDelay = DecodeFrame2(src, len, ...) + DecodeFrame2(NULL, 0, ...)
-		DECODING_STATE state = _decoder->DecodeFrameNoDelay(
-			static_cast<const u_char *>(stream_h264->GetData()),
-			static_cast<const int>(stream_h264->GetLength()),
-			ptrs,
-			&info
-		);
-
-		if (state != dsErrorFree)
+		// Update codec information if needed
+		if(_change_format == false)
 		{
-			// Todo RequestIDR or something like that.
-			logte("DecodeFrameNoDelay failed, state=%d,len=%d", state, stream_h264->GetLength());
+			ret = avcodec_parameters_from_context(_codec_par, _context);
 
-			*result = TranscodeResult::DataError;
-			return nullptr;
+			if(ret == 0)
+			{
+				ShowCodecParameters(_codec_par);
+
+				_change_format = true;
+
+				// If the format is changed, notify to another module
+				need_to_change_notify = true;
+			}
 		}
 
-		if(info.iBufferStatus != 1)
-		{
-			// 0 : one frame is not ready
-			// 1 : one frame is ready
-			continue;
-		}
+		_decoded_frame_num++;
 
-		auto frame_buffer = std::make_unique<MediaFrame>();
+		auto decoded_frame = std::make_unique<MediaFrame>();
 
-		frame_buffer->SetWidth(info.UsrData.sSystemBuffer.iWidth);
-		frame_buffer->SetHeight(info.UsrData.sSystemBuffer.iHeight);
-		frame_buffer->SetPts((pts == 0) ? -1 : pts);
+		decoded_frame->SetWidth(_frame->width);
+		decoded_frame->SetHeight(_frame->height);
+		decoded_frame->SetFormat(_frame->format);
+        decoded_frame->SetPts(_parser->pts - (33 * 2));
+		//decoded_frame->SetPts((_frame->pts == AV_NOPTS_VALUE) ? -1 : _frame->pts);
 
-		frame_buffer->SetStride(info.UsrData.sSystemBuffer.iStride[0], 0);
-		frame_buffer->SetStride(info.UsrData.sSystemBuffer.iStride[1], 1);
-		frame_buffer->SetStride(info.UsrData.sSystemBuffer.iStride[1], 2);
+		decoded_frame->SetStride(_frame->linesize[0], 0);
+		decoded_frame->SetStride(_frame->linesize[1], 1);
+		decoded_frame->SetStride(_frame->linesize[2], 2);
 
-		frame_buffer->SetBuffer(ptrs[0],frame_buffer->GetStride(0) * frame_buffer->GetHeight(), 0);
-		frame_buffer->SetBuffer(ptrs[1],frame_buffer->GetStride(1) * frame_buffer->GetHeight() / 2, 1);
-		frame_buffer->SetBuffer(ptrs[2],frame_buffer->GetStride(2) * frame_buffer->GetHeight() / 2, 2);
+		decoded_frame->SetBuffer(_frame->data[0], decoded_frame->GetStride(0) * decoded_frame->GetHeight(), 0);        // Y-Plane
+		decoded_frame->SetBuffer(_frame->data[1], decoded_frame->GetStride(1) * decoded_frame->GetHeight() / 2, 1);    // Cb Plane
+		decoded_frame->SetBuffer(_frame->data[2], decoded_frame->GetStride(2) * decoded_frame->GetHeight() / 2, 2);        // Cr Plane
 
-		*result = TranscodeResult::DataReady;
+#if DEBUG_PREVIEW_ENABLE && DEBUG_PREVIEW    // DEBUG for OpenCV
+		Mat *display_frame = nullptr;
 
-		if(_format_changed)
-		{
-			*result = TranscodeResult::FormatChanged;
-			_format_changed = false;
-		}
-		return std::move(frame_buffer);
+		AVUtilities::FrameConvert::AVFrameToCvMat(_frame, &display_frame, _frame->width);
+
+		cv::imshow("Decoded", *display_frame );
+		waitKey(1);
+		delete display_frame;
+#endif
+
+#if 0    // DEBUG
+		if(_decoded_frame_num % 10 == 0)
+		logti("decoded. num(%d), width(%d), height(%d), linesize(%d/%d/%d), format(%s), pts/dts(%.0f/%.0f)"
+				, _decoded_frame_num
+				, _frame->width
+				, _frame->height
+				, _frame->linesize[0]	// stride
+				, _frame->linesize[1]	// stride
+				, _frame->linesize[2]	// stride
+				, av_get_pix_fmt_name((AVPixelFormat)_frame->format)
+				, (float)(_frame->pts==AV_NOPTS_VALUE)? -1LL : _frame->pts
+				, (float)(_frame->pkt_dts==AV_NOPTS_VALUE)? -1LL : _frame->pkt_dts
+				);
+#endif
+
+		av_frame_unref(_frame);
+
+		*result = need_to_change_notify ? TranscodeResult::FormatChanged : TranscodeResult::DataReady;
+
+		return std::move(decoded_frame);
 	}
 
+	if(_input_buffer.empty() == false)
+	{
+		// Pop the first packet
+		auto buffer = std::move(_input_buffer.front());
+		_input_buffer.erase(_input_buffer.begin(), _input_buffer.begin() + 1);
+
+		auto packet_data = buffer->GetData();
+
+		int64_t remained = packet_data->GetLength();
+		off_t offset = 0LL;
+		int64_t pts = buffer->GetPts();
+        int64_t cts  = buffer->GetCts();
+		auto data = packet_data->GetDataAs<uint8_t>();
+
+		static int64_t first_pts = -1;
+
+		if(first_pts == -1)
+		{
+			first_pts = pts;
+		}
+
+        // logtd("decode frame - pts(%lld) cts(%lld)", buffer->GetPts(), buffer->GetCts());
+
+		while(remained > 0)
+		{
+			av_init_packet(_pkt);
+
+			int parsed_size = av_parser_parse2(_parser, _context, &_pkt->data, &_pkt->size,
+			                                   data + offset, static_cast<int>(remained), pts, pts, 0);
+
+			if(parsed_size < 0)
+			{
+				logte("An error occurred while parsing: %d", parsed_size);
+				*result = TranscodeResult::ParseError;
+				return nullptr;
+			}
+
+			if(_pkt->size > 0)
+			{
+				_pkt->pts = _parser->pts;
+				_pkt->flags = (_parser->key_frame == 1) ? AV_PKT_FLAG_KEY : 0;
+
+				ret = avcodec_send_packet(_context, _pkt);
+
+				if(ret == AVERROR(EAGAIN))
+				{
+					// Need more data
+				}
+				else if(ret == AVERROR_EOF)
+				{
+					logte("An error occurred while sending a packet for decoding: End of file (%d)", ret);
+				}
+				else if(ret == AVERROR(EINVAL))
+				{
+					logte("An error occurred while sending a packet for decoding: Invalid argument (%d)", ret);
+					*result = TranscodeResult::DataError;
+					return nullptr;
+				}
+				else if(ret == AVERROR(ENOMEM))
+				{
+					logte("An error occurred while sending a packet for decoding: No memory (%d)", ret);
+				}
+				else if(ret < 0)
+				{
+					logte("An error occurred while sending a packet for decoding: Unhandled error (%d)", ret);
+					*result = TranscodeResult::DataError;
+					return nullptr;
+				}
+			}
+
+			OV_ASSERT(
+				remained >= parsed_size,
+				"Current data size MUST greater than parsed_size, but data size: %ld, parsed_size: %ld",
+				remained, parsed_size
+			);
+
+			offset += parsed_size;
+			remained -= parsed_size;
+		}
+	}
+
+	*result = TranscodeResult::NoData;
 	return nullptr;
 }
-

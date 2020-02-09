@@ -33,6 +33,35 @@ namespace ov
 		OV_ASSERT2((void *)_address_ipv6 == (void *)(&_address_storage));
 	}
 
+	SocketAddress::SocketAddress(const ov::String &host_port)
+		: SocketAddress()
+	{
+		OV_ASSERT2((void *)_address_ipv4 == (void *)(&_address_storage));
+		OV_ASSERT2((void *)_address_ipv6 == (void *)(&_address_storage));
+
+		// <host>[:<port>]
+		auto tokens = host_port.Split(":");
+		bool result = false;
+
+		if(tokens.empty() == false)
+		{
+			// host
+			result = SetHostname(tokens[0]);
+
+			if(tokens.size() >= 2)
+			{
+				// port
+				result = SetPort(Converter::ToUInt16(tokens[1]));
+			}
+		}
+
+		if(result == false)
+		{
+			logte("An error occured: %s", host_port.CStr());
+			// OV_ASSERT2(result);
+		}
+	}
+
 	SocketAddress::SocketAddress(const ov::String &hostname, uint16_t port)
 		: SocketAddress(hostname.CStr(), port)
 	{
@@ -49,7 +78,11 @@ namespace ov
 		bool result = SetHostname(hostname);
 		result = result && SetPort(port);
 
-		OV_ASSERT2(result);
+		if(result == false)
+		{
+			logte("An error occured: %s:%d", hostname, port);
+			// OV_ASSERT2(result);
+		}
 	}
 
 	SocketAddress::SocketAddress(const sockaddr_in &addr_in)
@@ -195,7 +228,7 @@ namespace ov
 	bool SocketAddress::SetHostname(const char *hostname)
 	{
 		// 문자열로 부터 IP를 계산함
-		if(hostname == nullptr)
+		if((hostname == nullptr) || (hostname[0] == '\0') || ((hostname[0] == '*') && (hostname[1] == '\0')))
 		{
 			// host가 지정되어 있지 않으면 INADDR_ANY 로 설정
 			_address_storage.ss_family = AF_INET;
@@ -219,7 +252,7 @@ namespace ov
 			// IPv4로 변환 실패
 
 			// IPv6으로 시도
-			if(inet_pton(AF_INET6, hostname, &(_address_ipv6->sin6_addr)) != 0)
+			if(::inet_pton(AF_INET6, hostname, &(_address_ipv6->sin6_addr)) != 0)
 			{
 				// 변환 성공
 				_address_storage.ss_family = AF_INET6;
@@ -229,13 +262,18 @@ namespace ov
 				// IPv6으로 변환 실패
 
 				// DNS resolve 시도
-				addrinfo hints;
-				::memset(&hints, 0, sizeof(hints));
-				hints.ai_family = AF_UNSPEC;
+				addrinfo hints {};
 
-				addrinfo *result;
-				if(::getaddrinfo(hostname, nullptr, &hints, &result) != 0)
+				::memset(&hints, 0, sizeof(hints));
+				hints.ai_family = PF_UNSPEC;
+				hints.ai_socktype = SOCK_STREAM;
+				hints.ai_flags |= AI_CANONNAME;
+
+				addrinfo *result = nullptr;
+
+				if(::getaddrinfo(hostname, nullptr, nullptr, &result) != 0)
 				{
+					logte("An error occurred while resolve DNS for host [%s]", hostname);
 					return false;
 				}
 

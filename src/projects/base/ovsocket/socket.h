@@ -1,5 +1,3 @@
-#include <utility>
-
 //==============================================================================
 //
 //  OvenMediaEngine
@@ -16,9 +14,13 @@
 #include <sys/epoll.h>
 #include <netinet/in.h>
 
+#include <utility>
 #include <memory>
 #include <map>
 #include <functional>
+
+// for SRT
+#include <srt/srt.h>
 
 #include <base/ovlibrary/ovlibrary.h>
 
@@ -30,11 +32,16 @@ namespace ov
 	// socket()에서 실패했을때의 값
 	const int InvalidSocket = -1;
 
+	constexpr const int EpollMaxEvents = 1024;
+
+	constexpr const int MaxSrtPacketSize = 1316;
+
 	enum class SocketType : char
 	{
 		Unknown,
 		Udp,
 		Tcp,
+		Srt
 	};
 
 	enum class SocketState : char
@@ -47,20 +54,187 @@ namespace ov
 		Error,
 	};
 
-	class Socket
+	// socket_t와 SRTSOCKET의 타입이 int로 같으므로, 이를 추상화
+	struct SocketWrapper
 	{
 	public:
-		Socket(SocketType type, socket_t socket, const sockaddr_in &remote_addr_in);
+		SocketWrapper() = default;
+
+		explicit SocketWrapper(SocketType type, int sock)
+		{
+			SetSocket(type, sock);
+		}
+
+		bool operator ==(const int &sock) const
+		{
+			switch(_type)
+			{
+				case SocketType::Tcp:
+				case SocketType::Udp:
+					return _socket.socket == sock;
+
+				case SocketType::Srt:
+					return _socket.srt_socket == sock;
+
+				default:
+					return (sock == InvalidSocket);
+			}
+		}
+
+		bool operator !=(const int &sock) const
+		{
+			return !operator ==(sock);
+		}
+
+		int GetSocket() const
+		{
+			switch(_type)
+			{
+				case SocketType::Tcp:
+				case SocketType::Udp:
+					return _socket.socket;
+
+				case SocketType::Srt:
+					return _socket.srt_socket;
+
+				default:
+					return InvalidSocket;
+			}
+		}
+
+		void SetSocket(SocketType type, int sock)
+		{
+			switch(type)
+			{
+				case SocketType::Tcp:
+				case SocketType::Udp:
+					_socket.socket = sock;
+
+					if(sock != InvalidSocket)
+					{
+						_type = type;
+						_valid = true;
+					}
+					break;
+
+				case SocketType::Srt:
+					_socket.srt_socket = sock;
+
+					if(sock != SRT_INVALID_SOCK)
+					{
+						_type = type;
+						_valid = true;
+					}
+					break;
+
+				default:
+					OV_ASSERT2(type == SocketType::Unknown);
+					OV_ASSERT2(sock == InvalidSocket);
+
+					_type = SocketType::Unknown;
+					_socket.socket = InvalidSocket;
+					break;
+			}
+		}
+
+		void SetValid(bool valid)
+		{
+			_valid = valid;
+		}
+
+		const bool IsValid() const noexcept
+		{
+			return _valid;
+		}
+
+		SocketType GetType() const
+		{
+			return _type;
+		}
+
+		SocketWrapper &operator =(const SocketWrapper &wrapper) = default;
+
+	protected:
+		SocketType _type = SocketType::Unknown;
+		bool _valid = false;
+
+		union
+		{
+			socket_t socket;
+			SRTSOCKET srt_socket;
+		} _socket { InvalidSocket };
+	};
+
+	class Socket : public EnableSharedFromThis<Socket>
+	{
+	public:
+		Socket();
+		Socket(SocketWrapper socket, const SocketAddress &remote_address);
 		// socket은 복사 불가능 (descriptor 까지 복사되는 것 방지)
 		Socket(const Socket &socket) = delete;
 		Socket(Socket &&socket) noexcept;
 		virtual ~Socket();
 
+		bool Create(SocketType type);
+		bool MakeNonBlocking();
+
+		bool Bind(const SocketAddress &address);
+
+		bool Listen(int backlog = SOMAXCONN);
+
+		template<typename T>
+		std::shared_ptr<T> AcceptClient()
+		{
+			SocketAddress client;
+			SocketWrapper client_socket = AcceptClientInternal(&client);
+
+			if(client_socket.IsValid())
+			{
+				// Accept()는 TCP에서만 일어남
+				return std::make_shared<T>(client_socket, client);
+			}
+
+			return nullptr;
+		}
+
+		std::shared_ptr<ov::Error> Connect(const SocketAddress &endpoint, int timeout = Infinite);
+
+		bool PrepareEpoll();
+		bool AddToEpoll(Socket *socket, void *parameter);
+		int EpollWait(int timeout = Infinite);
+		const epoll_event *EpollEvents(int index);
+		bool RemoveFromEpoll(Socket *socket);
+
 		std::shared_ptr<SocketAddress> GetLocalAddress() const;
 		std::shared_ptr<SocketAddress> GetRemoteAddress() const;
 
+		// for normal socket
+		template<class T>
+		bool SetSockOpt(int option, const T &value)
+		{
+			return SetSockOpt(option, &value, (socklen_t)sizeof(T));
+		}
+
+		bool SetSockOpt(int option, const void *value, socklen_t value_length);
+
+		// for SRT
+		template<class T>
+		bool SetSockOpt(SRT_SOCKOPT option, const T &value)
+		{
+			return SetSockOpt(option, &value, static_cast<int>(sizeof(T)));
+		}
+
+		bool SetSockOpt(SRT_SOCKOPT option, const void *value, int value_length);
+
 		// 현재 소켓의 접속 상태
 		SocketState GetState() const;
+
+		void SetState(SocketState state);
+
+		SocketWrapper GetSocket() const
+		{
+			return _socket;
+		}
 
 		// 소켓 타입
 		SocketType GetType() const;
@@ -68,6 +242,7 @@ namespace ov
 		// 데이터 송신
 		virtual ssize_t Send(const void *data, size_t length);
 		virtual ssize_t Send(const std::shared_ptr<const Data> &data);
+        virtual ssize_t Send(const void *data, size_t length, bool &is_retry);
 
 		virtual ssize_t SendTo(const ov::SocketAddress &address, const void *data, size_t length);
 		virtual ssize_t SendTo(const ov::SocketAddress &address, const std::shared_ptr<const Data> &data);
@@ -87,56 +262,7 @@ namespace ov
 		virtual String ToString() const;
 
 	protected:
-		Socket();
-
-		bool Create(SocketType type);
-		bool MakeNonBlocking();
-
-		bool Bind(const SocketAddress &address);
-
-		bool Listen(int backlog = SOMAXCONN);
-
-		template<typename T>
-		std::shared_ptr<T> AcceptClient()
-		{
-			sockaddr_in client {};
-
-			socket_t client_socket = AcceptClientInternal(&client);
-
-			if(client_socket != InvalidSocket)
-			{
-				// Accept()는 TCP에서만 일어남
-				return std::make_shared<T>(SocketType::Tcp, client_socket, client);
-			}
-
-			return nullptr;
-		}
-
-		socket_t AcceptClientInternal(sockaddr_in *client);
-
-		bool Connect(const SocketAddress &endpoint, int timeout = Infinite);
-
-		bool PrepareEpoll();
-		bool AddToEpoll(Socket *socket, void *parameter);
-		int EpollWait(int timeout = Infinite);
-		const epoll_event *EpollEvents(int index);
-		bool RemoveFromEpoll(Socket *socket);
-
-		// socket 옵션을 설정하는 함수
-		template<class T>
-		bool SetSockOpt(int option, const T &value)
-		{
-			return SetSockOpt(option, &value, (socklen_t)sizeof(T));
-		}
-
-		bool SetSockOpt(int option, const void *value, socklen_t value_length);
-
-		void SetState(SocketState state);
-
-		socket_t GetSocket() const
-		{
-			return _socket;
-		}
+		SocketWrapper AcceptClientInternal(SocketAddress *client);
 
 		// utility method
 		static String StringFromEpollEvent(const epoll_event *event);
@@ -145,27 +271,22 @@ namespace ov
 		virtual String ToString(const char *class_name) const;
 
 	protected:
-		socket_t _socket;
+		SocketWrapper _socket;
 
-		// 소켓의 현재 상태
-		SocketState _state;
+		SocketState _state = SocketState::Closed;
 
-		// 소켓 타입
-		SocketType _type;
-		// socket descriptor
-		// socket_t _socket;
+		std::shared_ptr<ov::SocketAddress> _local_address = nullptr;
+		std::shared_ptr<ov::SocketAddress> _remote_address = nullptr;
 
-		// 로컬 정보
-		std::shared_ptr<ov::SocketAddress> _local_address;
-		// 리모트(peer) 정보
-		std::shared_ptr<ov::SocketAddress> _remote_address;
+		bool _is_nonblock = false;
 
-		// nonblock 소켓 여부
-		bool _is_nonblock;
-
-		// epoll 관련
-		socket_t _epoll;
-		epoll_event *_epoll_events;
-		int _last_epoll_event_count;
+		// Related to epoll
+		// for normal socket
+		socket_t _epoll = InvalidSocket;
+		// for srt socket
+		std::map<SRTSOCKET, void *> _srt_parameter_map;
+		int _srt_epoll = SRT_INVALID_SOCK;
+		epoll_event *_epoll_events = nullptr;
+		int _last_epoll_event_count = 0;
 	};
 }

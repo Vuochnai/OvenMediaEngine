@@ -30,12 +30,12 @@ bool OvenCodecImplAvcodecEncVP8::Configure(std::shared_ptr<TranscodeContext> con
 	}
 
 	// 인코딩 옵션 설정
-	_context->bit_rate = _transcode_context->GetVideoBitrate();
+	_context->bit_rate = _transcode_context->GetBitrate();
 	_context->rc_max_rate = _context->rc_min_rate = _context->bit_rate;
 	_context->rc_buffer_size = static_cast<int>(_context->bit_rate * 2);
 	_context->sample_aspect_ratio = (AVRational){ 1, 1 };
 	_context->time_base = (AVRational){
-		_transcode_context->GetVideoTimeBase().GetNum(), _transcode_context->GetVideoTimeBase().GetDen()
+		_transcode_context->GetTimeBase().GetNum(), _transcode_context->GetTimeBase().GetDen()
 	};
 	_context->framerate = av_d2q(_transcode_context->GetFrameRate(), AV_TIME_BASE);
 	_context->gop_size = _transcode_context->GetGOP();
@@ -101,7 +101,7 @@ std::unique_ptr<MediaPacket> OvenCodecImplAvcodecEncVP8::RecvBuffer(TranscodeRes
 			 (float)_pkt->pts, _pkt->size, _pkt->flags, _encoded_data_size);
 #endif
 
-		auto packet_buffer = std::make_unique<MediaPacket>(MediaCommonType::MediaType::Video, 0, _pkt->data, _pkt->size, _pkt->dts, (_pkt->flags & AV_PKT_FLAG_KEY) ? MediaPacketFlag::Key : MediaPacketFlag::NoFlag);
+		auto packet_buffer = std::make_unique<MediaPacket>(common::MediaType::Video, 0, _pkt->data, _pkt->size, _pkt->dts, (_pkt->flags & AV_PKT_FLAG_KEY) ? MediaPacketFlag::Key : MediaPacketFlag::NoFlag);
 
 		av_packet_unref(_pkt);
 
@@ -114,7 +114,11 @@ std::unique_ptr<MediaPacket> OvenCodecImplAvcodecEncVP8::RecvBuffer(TranscodeRes
 	///////////////////////////////////////////////////
 	while(_input_buffer.size() > 0)
 	{
-		const MediaFrame *frame = _input_buffer[0].get();
+		auto frame_buffer = std::move(_input_buffer[0]);
+		_input_buffer.erase(_input_buffer.begin(), _input_buffer.begin() + 1);
+
+		const MediaFrame *frame = frame_buffer.get();
+		OV_ASSERT2(frame != nullptr);
 
 		_frame->format = frame->GetFormat();
 		_frame->width = frame->GetWidth();
@@ -153,8 +157,6 @@ std::unique_ptr<MediaPacket> OvenCodecImplAvcodecEncVP8::RecvBuffer(TranscodeRes
 		}
 
 		av_frame_unref(_frame);
-
-		_input_buffer.erase(_input_buffer.begin(), _input_buffer.begin() + 1);
 	}
 
 	*result = TranscodeResult::NoData;

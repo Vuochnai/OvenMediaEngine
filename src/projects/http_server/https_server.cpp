@@ -23,7 +23,12 @@ void HttpsServer::SetLocalCertificate(const std::shared_ptr<Certificate> &certif
 	_local_certificate = certificate;
 }
 
-void HttpsServer::OnConnected(ov::Socket *remote)
+void HttpsServer::SetChainCertificate(const std::shared_ptr<Certificate> &certificate)
+{
+	_chain_certificate = certificate;
+}
+
+void HttpsServer::OnConnected(const std::shared_ptr<ov::Socket> &remote)
 {
 	HttpServer::OnConnected(remote);
 
@@ -44,7 +49,7 @@ void HttpsServer::OnConnected(ov::Socket *remote)
 			.destroy_callback = nullptr,
 			.ctrl_callback = [](ov::Tls *tls, int cmd, long num, void *arg) -> long
 			{
-				logti("[TLS] Ctrl: %d, %ld, %p", cmd, num, arg);
+				logtd("[TLS] Ctrl: %d, %ld, %p", cmd, num, arg);
 
 				switch(cmd)
 				{
@@ -65,30 +70,48 @@ void HttpsServer::OnConnected(ov::Socket *remote)
 
 	auto tls = std::make_shared<ov::Tls>();
 
-	if(tls->Initialize(TLS_server_method(), _local_certificate, HTTP_INTERMEDIATE_COMPATIBILITY, callback) == false)
+	if(tls->Initialize(TLS_server_method(), _local_certificate, _chain_certificate, HTTP_INTERMEDIATE_COMPATIBILITY, callback) == false)
 	{
+        logte("Tls initialize fail");
+
 		// TODO: Disconnect
 		return;
 	}
 
 	client->SetTls(tls);
+    client->SetTlsWriteToResponse(_tls_write_to_response);
 }
 
-void HttpsServer::OnDataReceived(ov::Socket *remote, const ov::SocketAddress &address, const std::shared_ptr<const ov::Data> &data)
+void HttpsServer::OnDataReceived(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const std::shared_ptr<const ov::Data> &data)
 {
 	auto client = FindClient(remote);
+
+	if(client == nullptr)
+	{
+		// client possible nullptr in thread 
+		//OV_ASSERT2(false);
+		logtw("http client is nullptr");
+		return;
+	}
 
 	// Need to decrypt using TLS
 
 	// * Data flow:
-	//   1. HttpClient::SetTlsData() -> // save data to HttpClient::_tls_data
+	//   1. HttpClient::SetTlsData() -> // save data to HttpClient::_tls_read_data
 	//   2. ov::Tls::Read() ->
 	//   3. SSL_read() ->
-	//   4. HttpClient::TlsRead() -> // read data from HttpClient::_tls_data
+	//   4. HttpClient::TlsRead() -> // read data from HttpClient::_tls_read_data
 	//   5. (ov::Tls::Read returns decrypted data)
 	logtd("Trying to set data for TLS\n%s", data->Dump(32).CStr());
 	client->SetTlsData(data);
 	auto tls = client->GetTls();
+
+	if(tls == nullptr)
+    {
+        logte("Tls is null: %s", remote->ToString().CStr());
+        HttpServer::Disconnect(client);
+        return;
+    }
 
 	if(client->IsAccepted() == false)
 	{
@@ -112,8 +135,7 @@ void HttpsServer::OnDataReceived(ov::Socket *remote, const ov::SocketAddress &ad
 
 			default:
 				logte("An error occurred while accept client: %s", remote->ToString().CStr());
-				client->GetResponse()->Close();
-				_client_list.erase(remote);
+				HttpServer::Disconnect(client);
 				return;
 		}
 	}

@@ -16,7 +16,10 @@ PhysicalPortManager::~PhysicalPortManager()
 {
 }
 
-std::shared_ptr<PhysicalPort> PhysicalPortManager::CreatePort(ov::SocketType type, const ov::SocketAddress &address)
+std::shared_ptr<PhysicalPort> PhysicalPortManager::CreatePort(ov::SocketType type,
+                                                              const ov::SocketAddress &address,
+                                                              int sned_buffer_size,
+                                                              int recv_buffer_size)
 {
 	auto key = std::make_pair(type, address);
 	auto item = _port_list.find(key);
@@ -25,9 +28,14 @@ std::shared_ptr<PhysicalPort> PhysicalPortManager::CreatePort(ov::SocketType typ
 	if(item == _port_list.end())
 	{
 		port = std::make_shared<PhysicalPort>();
-		if(port->Create(type, address))
+
+		if(port->Create(type, address, sned_buffer_size, recv_buffer_size))
 		{
 			_port_list[key] = port;
+		}
+		else
+		{
+			port = nullptr;
 		}
 	}
 	else
@@ -49,6 +57,12 @@ bool PhysicalPortManager::DeletePort(std::shared_ptr<PhysicalPort> &port)
 		return false;
 	}
 
-	_port_list.erase(item);
-	return false;
+	if(port.use_count() == 2)
+	{
+		// last reference
+		_port_list.erase(item);
+		port->Close();
+	}
+
+	return true;
 }

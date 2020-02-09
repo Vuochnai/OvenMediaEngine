@@ -15,6 +15,10 @@
 #include <http_server/http_server.h>
 #include <utility>
 
+WebSocketInterceptor::~WebSocketInterceptor()
+{
+}
+
 bool WebSocketInterceptor::IsInterceptorForRequest(const std::shared_ptr<const HttpRequest> &request, const std::shared_ptr<const HttpResponse> &response)
 {
 	// 여기서 web socket request 인지 확인
@@ -32,19 +36,19 @@ bool WebSocketInterceptor::IsInterceptorForRequest(const std::shared_ptr<const H
 		if(
 			// 3.   An |Upgrade| header field containing the value "websocket",
 			//      treated as an ASCII case-insensitive value.
-			(request->GetHeader("Upgrade") == "websocket") &&
+			(request->GetHeader("UPGRADE") == "websocket") &&
 
 			// 4.   A |Connection| header field that includes the token "Upgrade",
 			//      treated as an ASCII case-insensitive value.
-			(request->GetHeader("Connection").UpperCaseString().IndexOf("UPGRADE") >= 0L) &&
+			(request->GetHeader("CONNECTION").UpperCaseString().IndexOf("UPGRADE") >= 0L) &&
 
 			// 5.   A |Sec-WebSocket-Key| header field with a base64-encoded (see
 			//      Section 4 of [RFC4648]) value that, when decoded, is 16 bytes in
 			//      length.
-			request->IsHeaderExists("Sec-WebSocket-Key") &&
+			request->IsHeaderExists("SEC-WEBSOCKET-KEY") &&
 
 			// 6.   A |Sec-WebSocket-Version| header field, with a value of 13.
-			(request->GetHeader("Sec-WebSocket-Version") == "13")
+			(request->GetHeader("SEC-WEBSOCKET-VERSION") == "13")
 			)
 		{
 			// 나머지 사항은 체크하지 않음
@@ -77,7 +81,7 @@ bool WebSocketInterceptor::IsInterceptorForRequest(const std::shared_ptr<const H
 	return false;
 }
 
-void WebSocketInterceptor::OnHttpPrepare(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response)
+bool WebSocketInterceptor::OnHttpPrepare(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response)
 {
 	// RFC6455 - 4.2.2.  Sending the Server's Opening Handshake
 	response->SetStatusCode(HttpStatusCode::SwitchingProtocols);
@@ -92,7 +96,7 @@ void WebSocketInterceptor::OnHttpPrepare(const std::shared_ptr<HttpRequest> &req
 	//    concatenated value to obtain a 20-byte value and base64-
 	//    encoding (see Section 4 of [RFC4648]) this 20-byte hash.
 	const ov::String unique_id = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-	ov::String key = request->GetHeader("Sec-WebSocket-Key");
+	ov::String key = request->GetHeader("SEC-WEBSOCKET-KEY");
 
 	std::shared_ptr<ov::Data> hash = ov::MessageDigest::ComputeDigest(ov::CryptoAlgorithm::Sha1, (key + unique_id).ToData(false));
 	ov::String base64 = ov::Base64::Encode(hash);
@@ -104,7 +108,7 @@ void WebSocketInterceptor::OnHttpPrepare(const std::shared_ptr<HttpRequest> &req
 
 	// 지속적으로 통신해야 하므로, 연결은 끊지 않음
 	logtd("Add to websocket client list: %s", request->ToString().CStr());
-	auto websocket_response = std::make_shared<WebSocketResponse>(response->GetRemote(), request, response);
+	auto websocket_response = std::make_shared<WebSocketClient>(response->GetRemote(), request, response);
 	_websocket_client_list[request] = (WebSocketInfo){
 		.response = websocket_response,
 		.frame = nullptr
@@ -112,15 +116,18 @@ void WebSocketInterceptor::OnHttpPrepare(const std::shared_ptr<HttpRequest> &req
 
 	if(_connection_handler != nullptr)
 	{
-		_connection_handler(websocket_response);
+		return _connection_handler(websocket_response);
 	}
+
+	return true;
 }
 
-void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response, const std::shared_ptr<const ov::Data> &data)
+bool WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response, const std::shared_ptr<const ov::Data> &data)
 {
 	if(data->GetLength() == 0)
 	{
-		return;
+		// Nothing to do
+		return true;
 	}
 
 	auto item = _websocket_client_list.find(request);
@@ -129,7 +136,7 @@ void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &reques
 	{
 		// 반드시 _websocket_client_list 목록 안에 있어야 함
 		OV_ASSERT2(false);
-		return;
+		return false;
 	}
 
 	logtd("Data is received\n%s", data->Dump().CStr());
@@ -145,9 +152,7 @@ void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &reques
 	switch(frame->GetStatus())
 	{
 		case WebSocketFrameParseStatus::Prepare:
-			// 아직도 prepare 상태라면, 헤더 파싱을 못한 상황
-			logtw("Cannot parse header");
-			response->Close();
+			// Not enough data to parse header
 			break;
 
 		case WebSocketFrameParseStatus::Parsing:
@@ -161,11 +166,10 @@ void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &reques
 			{
 				// 접속 종료 요청됨
 				logtd("Client requested close connection: reason:\n%s", payload->Dump("Reason").CStr());
-				response->Close();
+				return false;
 			}
 			else
 			{
-
 				logtd("%s:\n%s", frame->ToString().CStr(), payload->Dump("Frame", 0L, 1024L, nullptr).CStr());
 
 				// 패킷 조립이 완료되었음
@@ -175,7 +179,10 @@ void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &reques
 					if(payload->GetLength() > 0L)
 					{
 						// 데이터가 있을 경우에만 올림
-						_message_handler(item->second.response, frame);
+						if(_message_handler(item->second.response, frame) == false)
+						{
+							return false;
+						}
 					}
 
 					item->second.frame = nullptr;
@@ -186,7 +193,7 @@ void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &reques
 
 				if(processed_bytes > 0L)
 				{
-					OnHttpData(request, response, data->Subdata(processed_bytes));
+					return OnHttpData(request, response, data->Subdata(processed_bytes));
 				}
 			}
 
@@ -196,9 +203,10 @@ void WebSocketInterceptor::OnHttpData(const std::shared_ptr<HttpRequest> &reques
 		case WebSocketFrameParseStatus::Error:
 			// 잘못된 데이터가 수신되었음 WebSocket 연결을 해제함
 			logtw("Invalid data received from %s", request->ToString().CStr());
-			response->Close();
-			break;
+			return false;
 	}
+
+	return true;
 }
 
 void WebSocketInterceptor::OnHttpError(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response, HttpStatusCode status_code)
@@ -217,8 +225,6 @@ void WebSocketInterceptor::OnHttpError(const std::shared_ptr<HttpRequest> &reque
 	_websocket_client_list.erase(item);
 
 	response->SetStatusCode(status_code);
-	response->Response();
-	response->Close();
 }
 
 void WebSocketInterceptor::OnHttpClosed(const std::shared_ptr<HttpRequest> &request, const std::shared_ptr<HttpResponse> &response)

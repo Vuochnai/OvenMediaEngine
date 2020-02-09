@@ -10,6 +10,7 @@
 
 #include "http_request.h"
 #include "http_response.h"
+#include <mutex>
 
 class HttpClient
 {
@@ -17,7 +18,7 @@ public:
 	friend class HttpServer;
 	friend class HttpsServer;
 
-	HttpClient(ov::ClientSocket *socket, const std::shared_ptr<HttpRequestInterceptor> &interceptor);
+	HttpClient(std::shared_ptr<ov::ClientSocket> socket, const std::shared_ptr<HttpRequestInterceptor> &interceptor);
 	virtual ~HttpClient() = default;
 
 	std::shared_ptr<HttpRequest> &GetRequest()
@@ -29,6 +30,18 @@ public:
 	{
 		return _response;
 	}
+
+    void Release()
+    {
+        // response mutex(tls)
+        std::unique_lock<std::mutex> lock(_response_guard);
+
+	    if(_response != nullptr && _response->GetTls() != nullptr)
+        {
+            _response = nullptr;
+	    }
+    }
+
 
 	void Send(const std::shared_ptr<ov::Data> &data);
 
@@ -42,13 +55,17 @@ public:
 		return _is_tls_accepted;
 	}
 
+    void SetTlsWriteToResponse(bool tls_write_to_response)
+    {
+        _tls_write_to_response = tls_write_to_response;
+    }
+
 protected:
 	//--------------------------------------------------------------------
 	// APIs which is related to TLS
 	//--------------------------------------------------------------------
 	void SetTls(const std::shared_ptr<ov::Tls> &tls);
 	std::shared_ptr<ov::Tls> GetTls();
-	std::shared_ptr<const ov::Tls> GetTls() const;
 
 	void SetTlsData(const std::shared_ptr<const ov::Data> &data);
 
@@ -61,7 +78,9 @@ protected:
 protected:
 	std::shared_ptr<HttpRequest> _request = nullptr;
 	std::shared_ptr<HttpResponse> _response = nullptr;
+    std::mutex _response_guard;
 
-	std::shared_ptr<const ov::Data> _tls_data = nullptr;
-	bool _is_tls_accepted = false;
+	std::shared_ptr<const ov::Data> _tls_read_data = nullptr;
+  	bool _is_tls_accepted = false;
+  	bool _tls_write_to_response = false;
 };

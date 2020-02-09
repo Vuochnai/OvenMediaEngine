@@ -136,7 +136,7 @@ namespace ov
 		_buffer[0] = c;
 		_length++;
 
-		_buffer[_length + 1] = '\0';
+		_buffer[_length] = '\0';
 
 		return true;
 	}
@@ -191,7 +191,7 @@ namespace ov
 		_buffer[_length] = c;
 		_length++;
 
-		_buffer[_length + 1] = '\0';
+		_buffer[_length] = '\0';
 
 		return true;
 	}
@@ -346,9 +346,12 @@ namespace ov
 
 	off_t String::IndexOf(char c, off_t start_position) const noexcept
 	{
-		off_t index;
+		if(start_position < 0)
+		{
+			return -1L;
+		}
 
-		for(index = start_position; index < _length; index++)
+		for(auto index = static_cast<size_t>(start_position); index < _length; index++)
 		{
 			if(_buffer[index] == c)
 			{
@@ -504,7 +507,7 @@ namespace ov
 
 	String String::Substring(off_t start) const
 	{
-		if((start < 0L) || (_length < start))
+		if((start < 0L) || (_length < static_cast<size_t>(start)))
 		{
 			return "";
 		}
@@ -514,7 +517,7 @@ namespace ov
 
 	String String::Substring(off_t start, size_t length) const
 	{
-		if((start < 0L) || (_length < start))
+		if((start < 0L) || (_length < static_cast<size_t>(start)))
 		{
 			return "";
 		}
@@ -579,7 +582,11 @@ namespace ov
 			return *this;
 		}
 
-		OV_ASSERT2(right_index >= left_index);
+		if(right_index < left_index)
+		{
+			// 공백으로만 이루어진 문자열
+			return "";
+		}
 
 		// left_index는 공백이 아닌 문자 지점이므로
 		return Substring(left_index, right_index - left_index + 1L);

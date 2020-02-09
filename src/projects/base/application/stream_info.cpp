@@ -3,7 +3,7 @@
 
 #define OV_LOG_TAG "StreamInfo"
 
-using namespace MediaCommonType;
+using namespace common;
 
 StreamInfo::StreamInfo()
 {
@@ -11,7 +11,7 @@ StreamInfo::StreamInfo()
 	// _input_source_type = kSourceTypeOrigin;
 
 	// ID RANDOM 생성
-	SetId(ov::Random::GenerateInteger());
+	SetId(ov::Random::GenerateUInt32());
 }
 
 StreamInfo::StreamInfo(uint32_t stream_id)

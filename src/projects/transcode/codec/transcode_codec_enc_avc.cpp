@@ -11,10 +11,20 @@
 
 #define OV_LOG_TAG "TranscodeCodec"
 
+OvenCodecImplAvcodecEncAVC::~OvenCodecImplAvcodecEncAVC()
+{
+	if(_encoder)
+	{
+		_encoder->Uninitialize();
+		WelsDestroySVCEncoder(_encoder);
+	}
+}
+
 bool OvenCodecImplAvcodecEncAVC::Configure(std::shared_ptr<TranscodeContext> context)
 {
 	if(WelsCreateSVCEncoder(&_encoder))
 	{
+		_encoder->Uninitialize();
 		logte("Unable to create H264 encoder");
 		return false;
 	}
@@ -27,17 +37,17 @@ bool OvenCodecImplAvcodecEncAVC::Configure(std::shared_ptr<TranscodeContext> con
 	param.fMaxFrameRate = context->GetFrameRate();
 	param.iPicWidth = context->GetVideoWidth();
 	param.iPicHeight = context->GetVideoHeight();
-	param.iTargetBitrate = context->GetVideoBitrate();
-	param.iRCMode = RC_QUALITY_MODE;
+	param.iTargetBitrate = context->GetBitrate();
+	param.iRCMode = RC_OFF_MODE;
 	param.iTemporalLayerNum = 1;
 	param.iSpatialLayerNum = 1;
 	param.bEnableDenoise = false;
 	param.bEnableBackgroundDetection = true;
 	param.bEnableAdaptiveQuant = true;
-	param.bEnableFrameSkip = true;
+	param.bEnableFrameSkip = false;
 	param.bEnableLongTermReference = false;
 	param.iLtrMarkPeriod = 30;
-	param.uiIntraPeriod = 100; // KeyFrame Interval (3 sec)
+	param.uiIntraPeriod = 30; // KeyFrame Interval (1 sec)
 	param.eSpsPpsIdStrategy = CONSTANT_ID;
 	param.bPrefixNalAddingCtrl = false;
 	param.sSpatialLayers[0].iVideoWidth = param.iPicWidth;
@@ -45,11 +55,12 @@ bool OvenCodecImplAvcodecEncAVC::Configure(std::shared_ptr<TranscodeContext> con
 	param.sSpatialLayers[0].fFrameRate = param.fMaxFrameRate;
 	param.sSpatialLayers[0].iSpatialBitrate = param.iTargetBitrate;
 	param.sSpatialLayers[0].iMaxSpatialBitrate = param.iMaxBitrate;
+	param.sSpatialLayers[0].uiProfileIdc = PRO_BASELINE;
+	param.sSpatialLayers[0].uiLevelIdc = LEVEL_3_1;     // baseline & lvl 3.1 => profile-level-id=42e01f
 
 	if(_encoder->InitializeExt(&param))
 	{
 		logte("H264 encoder initialize failed");
-		WelsDestroySVCEncoder(_encoder);
 		return false;
 	}
 
@@ -164,7 +175,7 @@ std::unique_ptr<MediaPacket> OvenCodecImplAvcodecEncAVC::RecvBuffer(TranscodeRes
 		*/
 
 		auto packet_buffer = std::make_unique<MediaPacket>(
-			MediaCommonType::MediaType::Video,
+			common::MediaType::Video,
 			0,
 			encoded.get(),
 			encoded_length,

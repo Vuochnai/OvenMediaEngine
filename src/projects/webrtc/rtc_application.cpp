@@ -4,19 +4,19 @@
 #include "ice/ice_port_manager.h"
 
 
-std::shared_ptr<RtcApplication> RtcApplication::Create(const std::shared_ptr<ApplicationInfo> &info,
+std::shared_ptr<RtcApplication> RtcApplication::Create(const info::Application *application_info,
                                                        std::shared_ptr<IcePort> ice_port,
                                                        std::shared_ptr<RtcSignallingServer> rtc_signalling)
 {
-	auto application = std::make_shared<RtcApplication>(info, ice_port, rtc_signalling);
+	auto application = std::make_shared<RtcApplication>(application_info, ice_port, rtc_signalling);
 	application->Start();
 	return application;
 }
 
-RtcApplication::RtcApplication(const std::shared_ptr<ApplicationInfo> &info,
+RtcApplication::RtcApplication(const info::Application *application_info,
                                std::shared_ptr<IcePort> ice_port,
                                std::shared_ptr<RtcSignallingServer> rtc_signalling)
-	: Application(info)
+	: Application(application_info)
 {
 	_ice_port = ice_port;
 	_rtc_signalling = rtc_signalling;
@@ -33,11 +33,16 @@ std::shared_ptr<Certificate> RtcApplication::GetCertificate()
 	return _certificate;
 }
 
-std::shared_ptr<Stream> RtcApplication::CreateStream(std::shared_ptr<StreamInfo> info)
+std::shared_ptr<Stream> RtcApplication::CreateStream(std::shared_ptr<StreamInfo> info, uint32_t worker_count)
 {
 	// Stream Class 생성할때는 복사를 사용한다.
 	logtd("CreateStream : %s/%u", info->GetName().CStr(), info->GetId());
-	return RtcStream::Create(GetSharedPtrAs<Application>(), *info.get());
+	if(worker_count == 0)
+	{
+		// RtcStream should have worker threads.
+		worker_count = MIN_STREAM_THREAD_COUNT;
+	}
+	return RtcStream::Create(GetSharedPtrAs<Application>(), *info, worker_count);
 }
 
 bool RtcApplication::DeleteStream(std::shared_ptr<StreamInfo> info)
@@ -53,10 +58,12 @@ bool RtcApplication::DeleteStream(std::shared_ptr<StreamInfo> info)
 		return false;
 	}
 
-	// 모든 Session에 Frame을 전달한다.
-	for(auto const &x : stream->GetSessionMap())
+	// 모든 Session의 연결을 종료한다.
+	const auto &sessions = stream->GetAllSessions();
+	for(auto it = sessions.begin(); it != sessions.end();)
 	{
-		auto session = std::static_pointer_cast<RtcSession>(x.second);
+		auto session = std::static_pointer_cast<RtcSession>(it->second);
+		it++;
 
 		// IcePort에 모든 Session 삭제
 		_ice_port->RemoveSession(session);
@@ -84,18 +91,18 @@ void RtcApplication::SendVideoFrame(std::shared_ptr<StreamInfo> info,
 
 bool RtcApplication::Start()
 {
-	if(!_certificate)
+	if(_certificate == nullptr)
 	{
 		// 인증서를 생성한다.
 		_certificate = std::make_shared<Certificate>();
-		if(!_certificate->Generate())
+
+		auto error = _certificate->Generate();
+		if(error != nullptr)
 		{
-			logte("Cannot create certificate");
+			logte("Cannot create certificate: %s", error->ToString().CStr());
 			return false;
 		}
 
-		// For Test
-		//_certificate->GenerateFromPem("cert.pem");
 		logti("WebRTC Application Started");
 	}
 
@@ -107,4 +114,23 @@ bool RtcApplication::Stop()
 	// TODO(dimiden): Application이 종료되는 경우는 향후 Application 단위의 재시작 기능이 개발되면 필요함
 	// 그 전에는 프로그램 종료까지 본 함수는 호출되지 않음
 	return Application::Stop();
+}
+
+// RTCP RR packet info
+// call from stream -> session -> RtpRtcp
+// packetyzer checkr check ssrc_1(video/audio)
+void RtcApplication::OnReceiverReport(uint32_t stream_id,
+                                      uint32_t session_id,
+                                      time_t first_receiver_report_time,
+                                      const std::shared_ptr<RtcpReceiverReport> &receiver_report)
+{
+    logtd("Rtcp Report: app(%u) stream(%u) session(%u) ssrc(%u) fraction(%u/256) packet_lost(%d) jitter(%u) delay(%.6f)",
+          GetId(),
+          stream_id,
+          session_id,
+          receiver_report->ssrc_1,
+          receiver_report->fraction_lost,
+          receiver_report->packet_lost,
+          receiver_report->jitter,
+          receiver_report->rtt);
 }

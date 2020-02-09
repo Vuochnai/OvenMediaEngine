@@ -17,18 +17,85 @@
 
 #define OV_LOG_TAG "TranscodeStream"
 
-TranscodeStream::TranscodeStream(std::shared_ptr<StreamInfo> stream_info, TranscodeApplication *parent)
+std::map<uint32_t, std::set<ov::String>> TranscodeStream::_stream_list;
+
+common::MediaCodecId GetCodecId(ov::String name)
+{
+	name.MakeUpper();
+
+	// Video codecs
+	if(name == "H264")
+	{
+		return common::MediaCodecId::H264;
+	}
+	else if(name == "VP8")
+	{
+		return common::MediaCodecId::Vp8;
+	}
+	else if(name == "VP9")
+	{
+		return common::MediaCodecId::Vp9;
+	}
+
+	// Audio codecs
+	if(name == "FLV")
+	{
+		return common::MediaCodecId::Flv;
+	}
+	else if(name == "AAC")
+	{
+		return common::MediaCodecId::Aac;
+	}
+	else if(name == "MP3")
+	{
+		return common::MediaCodecId::Mp3;
+	}
+	else if(name == "OPUS")
+	{
+		return common::MediaCodecId::Opus;
+	}
+
+	return common::MediaCodecId::None;
+}
+
+int GetBitrate(ov::String bitrate)
+{
+	bitrate.MakeUpper();
+
+	int multiplier = 1;
+
+	if(bitrate.HasSuffix("K"))
+	{
+		multiplier = 1024;
+	}
+	else if(bitrate.HasSuffix("M"))
+	{
+		multiplier = 1024 * 1024;
+	}
+
+	return static_cast<int>(ov::Converter::ToFloat(bitrate) * multiplier);
+}
+
+TranscodeStream::TranscodeStream(const info::Application *application_info, std::shared_ptr<StreamInfo> stream_info, TranscodeApplication *parent)
+	: _application_info(application_info)
 {
 	logtd("Created Transcode stream. name(%s)", stream_info->GetName().CStr());
 
 	// 통계 정보 초기화
 	_stats_decoded_frame_count = 0;
 
+	// maximum queue size
+	_max_queue_size = 0;
+
+	_stats_queue_full_count = 0;
+
 	// 부모 클래스
 	_parent = parent;
 
-	// 입력 스트림 정보	
+	// 입력 스트림 정보
 	_stream_info_input = stream_info;
+
+	_stream_list[_application_info->GetId()];
 
 	// Prepare decoders
 	for(auto &track : _stream_info_input->GetTracks())
@@ -36,77 +103,144 @@ TranscodeStream::TranscodeStream(std::shared_ptr<StreamInfo> stream_info, Transc
 		CreateDecoder(track.second->GetId());
 	}
 
-	// TODO(dimiden): Read these values from config file
-	auto app_info = parent->GetApplicationInfo();
-	auto config = ConfigManager::Instance()->GetApplicationInfo(app_info->GetName());
+	if(_decoders.empty())
+	{
+		return;
+	}
 
-	_transcode_context = std::make_shared<TranscodeContext>();
+	// Generate track list by profile(=encode name)
+	auto encodes = _application_info->GetEncodes();
+	std::map<ov::String, std::vector<uint8_t >> profile_tracks;
+	std::vector<uint8_t> tracks;
 
-	_transcode_context->SetVideoCodecId(MediaCommonType::MediaCodecId::Vp8);
-	_transcode_context->SetVideoBitrate(5000000);
+	for(const auto &encode : encodes)
+	{
+		if(!encode.IsActive())
+		{
+			continue;
+		}
 
-	_transcode_context->SetVideoWidth(480);
-	_transcode_context->SetVideoHeight(320);
-	_transcode_context->SetFrameRate(30.00f);
-	_transcode_context->SetGOP(30);
-	_transcode_context->SetVideoTimeBase(1, 1000000);
+		auto video_profile = encode.GetVideoProfile();
+		auto audio_profile = encode.GetAudioProfile();
+		auto profile_name = encode.GetName();
 
-	_transcode_context->SetAudioCodecId(MediaCommonType::MediaCodecId::Opus);
-	_transcode_context->SetAudioBitrate(64000);
-	_transcode_context->SetAudioSampleRate(48000);
-	_transcode_context->GetAudioChannel().SetLayout(MediaCommonType::AudioChannel::Layout::LayoutStereo);
-	_transcode_context->SetAudioSampleFormat(MediaCommonType::AudioSample::Format::S16);
-	_transcode_context->SetAudioTimeBase(1, 1000000);
+		if((video_profile != nullptr) && (video_profile->IsActive()))
+		{
+			auto context = std::make_shared<TranscodeContext>(
+				GetCodecId(video_profile->GetCodec()),
+				GetBitrate(video_profile->GetBitrate()),
+				video_profile->GetWidth(), video_profile->GetHeight(),
+				video_profile->GetFramerate()
+			);
+			uint8_t track_id = AddContext(common::MediaType::Video, context);
+			if(track_id)
+			{
+				tracks.push_back(track_id);
+			}
+		}
+
+		if((audio_profile != nullptr) && (audio_profile->IsActive()))
+		{
+			auto context = std::make_shared<TranscodeContext>(
+				GetCodecId(audio_profile->GetCodec()),
+				GetBitrate(audio_profile->GetBitrate()),
+				audio_profile->GetSamplerate()
+			);
+			uint8_t track_id = AddContext(common::MediaType::Audio, context);
+			if(track_id)
+			{
+				tracks.push_back(track_id);
+			}
+		}
+
+		if(!tracks.empty())
+		{
+			profile_tracks[profile_name] = tracks;
+			tracks.clear();
+		}
+	}
+
+	// Generate track list by stream
+	auto streams = _application_info->GetStreamList();
+
+	for(const auto &stream : streams)
+	{
+		auto stream_name = stream.GetName();
+		if(::strstr(stream_name.CStr(), "${OriginStreamName}") == nullptr)
+		{
+			logtw("Current stream setting (%s) does not use ${OriginStreamName} macro", stream_name.CStr());
+		}
+
+		stream_name = stream_name.Replace("${OriginStreamName}", stream_info->GetName());
+
+		if(!AddStreamInfoOutput(stream_name))
+		{
+			continue;
+		}
+
+		auto profiles = stream.GetProfiles();
+
+		for(const auto &profile : profiles)
+		{
+			auto item = profile_tracks.find(profile.GetName());
+			if(item == profile_tracks.end())
+			{
+				logtw("Encoder for [%s] does not exist in Server.xml", profile.GetName().CStr());
+				continue;
+			}
+			tracks.push_back(item->second[0]);  // Video
+			tracks.push_back(item->second[1]);  // Audio
+		}
+		_stream_tracks[stream_name] = tracks;
+		tracks.clear();
+	}
+
+	// Generate unused track list to delete
+	for(auto context : _contexts)
+	{
+		bool found = false;
+		for(auto stream_track : _stream_tracks)
+		{
+			auto it = find(stream_track.second.begin(), stream_track.second.end(), context.first);
+			if(it != stream_track.second.end())
+			{
+				found = true;
+				break;
+			}
+		}
+		if(!found)
+		{
+			tracks.push_back(context.first);
+		}
+	}
+
+	// Delete unused context
+	for(auto track : tracks)
+	{
+		_contexts.erase(track);
+	}
 
 	///////////////////////////////////////////////////////
 	// 트랜스코딩된 스트림을 생성함
 	///////////////////////////////////////////////////////
-	// TODO(soulk): 트랜스코딩 프로파일이 여러 개 되는 경우 처리 (TranscodeSteam 모듈에서 Output Stream Info를 여러개 생성해서 처리할지 구조적으로 검토를 해봐야함.)
-	_stream_info_output = std::make_shared<StreamInfo>();
 
-	// TODO(dimiden): Read stream name rule from config file
-	_stream_info_output->SetName(ov::String::FormatString("%s_o", stream_info->GetName().CStr()));
-
-	// Copy tracks
+	// Copy tracks (video & audio)
 	for(auto &track : _stream_info_input->GetTracks())
 	{
 		// 기존 스트림의 미디어 트랙 정보
 		auto &cur_track = track.second;
-
-		// 새로운 스트림의 트랙 정보
-		auto new_track = std::make_shared<MediaTrack>();
-
-		new_track->SetId(cur_track->GetId());
-		new_track->SetMediaType(cur_track->GetMediaType());
-
-		switch(cur_track->GetMediaType())
-		{
-			case MediaCommonType::MediaType::Video:
-				new_track->SetCodecId(_transcode_context->GetVideoCodecId());
-				new_track->SetWidth(_transcode_context->GetVideoWidth());
-				new_track->SetHeight(_transcode_context->GetVideoHeight());
-				new_track->SetFrameRate(_transcode_context->GetFrameRate());
-				new_track->SetTimeBase(_transcode_context->GetVideoTimeBase().GetNum(), _transcode_context->GetVideoTimeBase().GetDen());
-				break;
-
-			case MediaCommonType::MediaType::Audio:
-				new_track->SetCodecId(_transcode_context->GetAudioCodecId());
-				new_track->SetSampleRate(_transcode_context->GetAudioSampleRate());
-				new_track->GetSample().SetFormat(_transcode_context->GetAudioSample().GetFormat());
-				new_track->GetChannel().SetLayout(_transcode_context->GetAudioChannel().GetLayout());
-				new_track->SetTimeBase(_transcode_context->GetAudioTimeBase().GetNum(), _transcode_context->GetAudioTimeBase().GetDen());
-				break;
-
-			default:
-				// Media type is not supported.
-				continue;
-		}
-
-		_stream_info_output->AddTrack(new_track);
-
-		// av_log_set_level(AV_LOG_DEBUG);
-		CreateEncoder(new_track, _transcode_context);
+		CreateEncoders(cur_track);
 	}
+
+	if(_encoders.empty())
+	{
+		return;
+	}
+
+	// _max_queue_size : 255
+	_max_queue_size = (_encoders.size() > 0x0F) ? 0xFF : _encoders.size() * 256;
+
+	logti("Transcoder Information / Encoders(%d) / Streams(%d)", _encoders.size(), _stream_tracks.size());
 
 	// 패킷 저리 스레드 생성
 	try
@@ -145,26 +279,41 @@ void TranscodeStream::Stop()
 	logtd("wait for terminated trancode stream thread. kill_flag(%s)", _kill_flag ? "true" : "false");
 
 	_queue.abort();
-	_thread_decode.join();
 
+	if(_thread_decode.joinable())
+	{
+		_thread_decode.join();
+	}
 	_queue_decoded.abort();
 
-	_thread_filter.join();
-
+	if(_thread_filter.joinable())
+	{
+		_thread_filter.join();
+	}
 	_queue_filterd.abort();
 
-	_thread_encode.join();
-}
-
-std::shared_ptr<StreamInfo> TranscodeStream::GetStreamInfo()
-{
-	return _stream_info_input;
+	if(_thread_encode.joinable())
+	{
+		_thread_encode.join();
+	}
 }
 
 bool TranscodeStream::Push(std::unique_ptr<MediaPacket> packet)
 {
 	// logtd("Stage-1-1 : %f", (float)frame->GetPts());
 	// 변경된 스트림을 큐에 넣음
+
+	if(_encoders.empty())
+	{
+		return false;
+	}
+
+	if(_queue.size() > _max_queue_size)
+	{
+		logti("Queue(stream) is full, please check your system");
+		return false;
+	}
+
 	_queue.push(std::move(packet));
 
 	return true;
@@ -174,11 +323,6 @@ bool TranscodeStream::Push(std::unique_ptr<MediaPacket> packet)
 // {
 // 	return _queue.pop_unique();
 // }
-
-uint32_t TranscodeStream::GetBufferCount()
-{
-	return _queue.size();
-}
 
 void TranscodeStream::CreateDecoder(int32_t media_track_id)
 {
@@ -192,7 +336,11 @@ void TranscodeStream::CreateDecoder(int32_t media_track_id)
 	}
 
 	// create decoder for codec id
-	_decoders[media_track_id] = std::move(TranscodeDecoder::CreateDecoder(track->GetCodecId()));
+	auto decoder = std::move(TranscodeDecoder::CreateDecoder(track->GetCodecId()));
+	if(decoder != nullptr)
+	{
+		_decoders[media_track_id] = std::move(decoder);
+	}
 }
 
 void TranscodeStream::CreateEncoder(std::shared_ptr<MediaTrack> media_track, std::shared_ptr<TranscodeContext> transcode_context)
@@ -203,14 +351,18 @@ void TranscodeStream::CreateEncoder(std::shared_ptr<MediaTrack> media_track, std
 	}
 
 	// create encoder for codec id
-	_encoders[media_track->GetId()] = std::move(TranscodeEncoder::CreateEncoder(media_track->GetCodecId(), transcode_context));
+	auto encoder = std::move(TranscodeEncoder::CreateEncoder(media_track->GetCodecId(), transcode_context));
+	if(encoder != nullptr)
+	{
+		_encoders[media_track->GetId()] = std::move(encoder);
+	}
 }
 
 void TranscodeStream::ChangeOutputFormat(MediaFrame *buffer)
 {
 	if(buffer == nullptr)
 	{
-		logte("invalid media buffer");
+		logte("Invalid media buffer");
 		return;
 	}
 
@@ -218,6 +370,7 @@ void TranscodeStream::ChangeOutputFormat(MediaFrame *buffer)
 
 	// 트랙 정보
 	auto &track = _stream_info_input->GetTrack(track_id);
+
 	if(track == nullptr)
 	{
 		logte("cannot find output media track. track_id(%d)", track_id);
@@ -225,151 +378,135 @@ void TranscodeStream::ChangeOutputFormat(MediaFrame *buffer)
 		return;
 	}
 
-	if(track->GetMediaType() == MediaCommonType::MediaType::Video)
-	{
-		logtd("parsed form media buffer. width:%d, height:%d, format:%d", buffer->GetWidth(), buffer->GetHeight(), buffer->GetFormat());
-
-		track->SetWidth(buffer->GetWidth());
-		track->SetHeight(buffer->GetHeight());
-		track->GetTimeBase().Set(1, 1000);
-
-		_filters[track->GetId()] = std::make_unique<TranscodeFilter>(TranscodeFilterType::VideoRescaler, track, _transcode_context);
-	}
-	else if(track->GetMediaType() == MediaCommonType::MediaType::Audio)
-	{
-		logtd("parsed form media buffer. format(%d), bytes_per_sample(%d), nb_samples(%d), channels(%d), channel_layout(%d), sample_rate(%d)",
-		      buffer->GetFormat(), buffer->GetBytesPerSample(), buffer->GetNbSamples(), buffer->GetChannels(), buffer->GetChannelLayout(), buffer->GetSampleRate()
-		);
-
-		track->SetSampleRate(buffer->GetSampleRate());
-		track->GetSample().SetFormat(buffer->GetFormat<MediaCommonType::AudioSample::Format>());
-		track->GetChannel().SetLayout(buffer->GetChannelLayout());
-		track->GetTimeBase().Set(1, 1000);
-
-		_filters[track->GetId()] = std::make_unique<TranscodeFilter>(TranscodeFilterType::AudioResampler, track, _transcode_context);
-	}
+	CreateFilters(track, buffer);
 }
 
-TranscodeResult TranscodeStream::do_decode(int32_t track_id, std::unique_ptr<const MediaPacket> packet)
+TranscodeResult TranscodeStream::DecodePacket(int32_t track_id, std::unique_ptr<const MediaPacket> packet)
 {
-	////////////////////////////////////////////////////////
-	// 1) 디코더에 전달함
-	////////////////////////////////////////////////////////
 	auto decoder_item = _decoders.find(track_id);
-
 	if(decoder_item == _decoders.end())
 	{
 		return TranscodeResult::NoData;
 	}
+	auto decoder = decoder_item->second.get();
 
-	TranscodeDecoder *decoder = decoder_item->second.get();
+	logtp("[#%d] Trying to decode a frame (PTS: %lld)", track_id, packet->GetPts());
 	decoder->SendBuffer(std::move(packet));
 
 	while(true)
 	{
 		TranscodeResult result;
-		auto ret_frame = decoder->RecvBuffer(&result);
+		auto decoded_frame = decoder->RecvBuffer(&result);
 
 		switch(result)
 		{
 			case TranscodeResult::FormatChanged:
-				// output format change 이벤트가 발생하면...
-				// filter 및 인코더를 여기서 다시 초기화 해줘야함.
-				// 디코더에 의해서 포맷 정보가 새롭게 알게되거나, 변경됨을 나타내를 반환값
+				// It indicates output format is changed
 
-				// logte("changed output format");
-				// 필터 컨테스트 생성
-				// 인코더 커테스트 생성
-				ret_frame->SetTrackId(track_id);
+				// Re-create filter and encoder using the format
 
-				ChangeOutputFormat(ret_frame.get());
+				// TODO(soulk): Re-create the filter context
+				// TODO(soulk): Re-create the encoder context
+
+				decoded_frame->SetTrackId(track_id);
+
+				ChangeOutputFormat(decoded_frame.get());
+
 				break;
 
 			case TranscodeResult::DataReady:
-				// 디코딩이 성공하면,
-				ret_frame->SetTrackId(track_id);
+				decoded_frame->SetTrackId(track_id);
 
-				// 필터 단계로 전달
-				// do_filter(track_id, std::move(ret_frame));
+				logtp("[#%d] A packet is decoded (PTS: %lld)", track_id, decoded_frame->GetPts());
 
 				_stats_decoded_frame_count++;
 
 				if(_stats_decoded_frame_count % 300 == 0)
 				{
-					logtd("stats. rq(%d), dq(%d), fq(%d)", _queue.size(), _queue_decoded.size(), _queue_filterd.size());
+					logtd("Decode stats: queue(%d), decoded_queue(%d), filtered_queue(%d)", _queue.size(), _queue_decoded.size(), _queue_filterd.size());
 				}
 
-				_queue_decoded.push(std::move(ret_frame));
+				if(_queue_decoded.size() > _max_queue_size)
+				{
+					logti("Decoded frame queue is full, please check your system");
+					return result;
+				}
+
+				_queue_decoded.push(std::move(decoded_frame));
+
 				break;
 
 			default:
-				// 에러, 또는 디코딩된 패킷이 없다면 종료
+				// An error occurred
+				// There is no frame to process
 				return result;
 		}
 	}
 }
 
-TranscodeResult TranscodeStream::do_filter(int32_t track_id, std::unique_ptr<MediaFrame> frame)
+TranscodeResult TranscodeStream::FilterFrame(int32_t track_id, std::unique_ptr<MediaFrame> frame)
 {
-	////////////////////////////////////////////////////////
-	// 1) 디코더에 전달함
-	////////////////////////////////////////////////////////
-	auto filter = _filters.find(track_id);
-
-	if(filter == _filters.end())
+	auto filter_item = _filters.find(track_id);
+	if(filter_item == _filters.end())
 	{
 		return TranscodeResult::NoData;
 	}
+	auto filter = filter_item->second.get();
 
-	logd("TranscodeStream.Packet", "SendBuffer to do_filter()\n%s", ov::Dump(frame->GetBuffer(0), frame->GetBufferSize(0), 32).CStr());
-
-	filter->second->SendBuffer(std::move(frame));
+	logtp("[#%d] Trying to apply a filter to the frame (PTS: %lld)", track_id, frame->GetPts());
+	filter->SendBuffer(std::move(frame));
 
 	while(true)
 	{
 		TranscodeResult result;
-		auto ret_frame = filter->second->RecvBuffer(&result);
+		auto filtered_frame = filter->RecvBuffer(&result);
 
 		// 에러, 또는 디코딩된 패킷이 없다면 종료
 		switch(result)
 		{
 			case TranscodeResult::DataReady:
-				ret_frame->SetTrackId(track_id);
+				filtered_frame->SetTrackId(track_id);
 
-				logd("Transcode.Packet", "Received from filter:\n%s", ov::Dump(ret_frame->GetBuffer(0), ret_frame->GetBufferSize(0), 32).CStr());
+				logtp("[#%d] A frame is filtered (PTS: %lld)", track_id, filtered_frame->GetPts());
 
-				// logtd("filtered frame. track_id(%d), pts(%.0f)", ret_frame->GetTrackId(), (float)ret_frame->GetPts());
+				if(_queue_filterd.size() > _max_queue_size)
+				{
+					_stats_queue_full_count++;
 
-				_queue_filterd.push(std::move(ret_frame));
-				// do_encode(track_id, std::move(ret_frame));
+					if(_stats_queue_full_count % 256 == 0)
+					{
+						logti("Filtered frame queue is full, please decrease encoding options (resolution, bitrate, framerate)");
+					}
+
+					return result;
+				}
+
+				_queue_filterd.push(std::move(filtered_frame));
+
 				break;
 
 			default:
 				return result;
 		}
 	}
-
-	return TranscodeResult::DataReady;
 }
 
-TranscodeResult TranscodeStream::do_encode(int32_t track_id, std::unique_ptr<const MediaFrame> frame)
+TranscodeResult TranscodeStream::EncodeFrame(int32_t track_id, std::unique_ptr<const MediaFrame> frame)
 {
-	if(_encoders.find(track_id) == _encoders.end())
+	auto encoder_item = _encoders.find(track_id);
+	if(encoder_item == _encoders.end())
 	{
 		return TranscodeResult::NoData;
 	}
+	auto encoder = encoder_item->second.get();
 
-	////////////////////////////////////////////////////////
-	// 2) 인코더에 전달
-	////////////////////////////////////////////////////////
-
-	auto &encoder = _encoders[track_id];
+	logtp("[#%d] Trying to encode the frame (PTS: %lld)", track_id, frame->GetPts());
 	encoder->SendBuffer(std::move(frame));
 
 	while(true)
 	{
 		TranscodeResult result;
-		auto ret_packet = encoder->RecvBuffer(&result);
+		auto encoded_packet = encoder->RecvBuffer(&result);
 
 		if(static_cast<int>(result) < 0)
 		{
@@ -378,25 +515,20 @@ TranscodeResult TranscodeStream::do_encode(int32_t track_id, std::unique_ptr<con
 
 		if(result == TranscodeResult::DataReady)
 		{
-			ret_packet->SetTrackId(track_id);
+			encoded_packet->SetTrackId(track_id);
 
-			// logtd("encoded packet. track_id(%d), pts(%.0f)", ret_packet->GetTrackId(), (float)ret_packet->GetPts());
+			logtp("[#%d] A packet is encoded (PTS: %lld)", track_id, encoded_packet->GetPts());
 
-			////////////////////////////////////////////////////////
-			// 3) 미디어 라우더에 전달
-			////////////////////////////////////////////////////////
-			_parent->SendFrame(_stream_info_output, std::move(ret_packet));
+			// Send the packet to MediaRouter
+			SendFrame(std::move(encoded_packet));
 		}
 	}
-
-	return TranscodeResult::DataReady;
 }
 
 // 디코딩 & 인코딩 스레드
 void TranscodeStream::DecodeTask()
 {
-	// 스트림 생성 전송
-	_parent->CreateStream(_stream_info_output);
+	CreateStreams();
 
 	logtd("Started transcode stream decode thread");
 
@@ -413,11 +545,11 @@ void TranscodeStream::DecodeTask()
 		// 패킷의 트랙 아이디를 조회
 		int32_t track_id = packet->GetTrackId();
 
-		do_decode(track_id, std::move(packet));
+		DecodePacket(track_id, std::move(packet));
 	}
 
 	// 스트림 삭제 전송
-	_parent->DeleteStream(_stream_info_output);
+	DeleteStreams();
 
 	logtd("Terminated transcode stream decode thread");
 }
@@ -436,11 +568,7 @@ void TranscodeStream::FilterTask()
 			continue;
 		}
 
-		// 패킷의 트랙 아이디를 조회
-		int32_t track_id = frame->GetTrackId();
-
-		// logtd("Stage-1-2 : %f", (float)frame->GetPts());
-		do_filter(track_id, std::move(frame));
+		DoFilters(std::move(frame));
 	}
 
 	logtd("Transcode filter thread is terminated");
@@ -464,8 +592,218 @@ void TranscodeStream::EncodeTask()
 		int32_t track_id = frame->GetTrackId();
 
 		// logtd("Stage-1-2 : %f", (float)frame->GetPts());
-		do_encode(track_id, std::move(frame));
+		EncodeFrame(track_id, std::move(frame));
 	}
 
 	logtd("Terminated transcode stream encode thread");
+}
+
+bool TranscodeStream::AddStreamInfoOutput(ov::String stream_name)
+{
+	auto stream_list = _stream_list.find(_application_info->GetId());
+	if(stream_list == _stream_list.end())
+	{
+		// This code cannot happen.
+		return false;
+	}
+
+	auto stream = stream_list->second.find(stream_name);
+	if(stream != stream_list->second.end())
+	{
+		logtw("Output stream with the same name (%s) already exists", stream_name.CStr());
+		return false;
+	}
+	stream_list->second.insert(stream_name);
+
+	auto stream_info_output = std::make_shared<StreamInfo>();
+	stream_info_output->SetName(stream_name);
+
+	_stream_info_outputs.insert(
+		std::make_pair(stream_name, stream_info_output)
+	);
+	return true;
+}
+
+void TranscodeStream::CreateStreams()
+{
+	for(auto &iter : _stream_info_outputs)
+	{
+		_parent->CreateStream(iter.second);
+	}
+}
+
+void TranscodeStream::DeleteStreams()
+{
+	for(auto &iter : _stream_info_outputs)
+	{
+		_parent->DeleteStream(iter.second);
+	}
+
+	_stream_info_outputs.clear();
+	_stream_list[_application_info->GetId()].clear();
+}
+
+void TranscodeStream::SendFrame(std::unique_ptr<MediaPacket> packet)
+{
+	uint8_t track_id = static_cast<uint8_t>(packet->GetTrackId());
+
+	for(auto &iter : _stream_info_outputs)
+	{
+		auto stream_track = _stream_tracks.find(iter.first);
+		if(stream_track == _stream_tracks.end())
+		{
+			continue;
+		}
+
+		auto it = find(stream_track->second.begin(), stream_track->second.end(), track_id);
+		if(it == stream_track->second.end())
+		{
+			continue;
+		}
+
+		auto clone_packet = packet->ClonePacket();
+		_parent->SendFrame(iter.second, std::move(clone_packet));
+	}
+}
+
+void TranscodeStream::CreateEncoders(std::shared_ptr<MediaTrack> media_track)
+{
+	for(auto &iter : _contexts)
+	{
+		if(media_track->GetMediaType() != iter.second->GetMediaType())
+		{
+			continue;
+		}
+
+		auto new_track = std::make_shared<MediaTrack>();
+		new_track->SetId((uint32_t)iter.first);
+		new_track->SetMediaType(media_track->GetMediaType());
+		new_track->SetCodecId(iter.second->GetCodecId());
+		new_track->SetTimeBase(iter.second->GetTimeBase().GetNum(), iter.second->GetTimeBase().GetDen());
+		new_track->SetBitrate(iter.second->GetBitrate());
+
+		if(media_track->GetMediaType() == common::MediaType::Video)
+		{
+			new_track->SetWidth(iter.second->GetVideoWidth());
+			new_track->SetHeight(iter.second->GetVideoHeight());
+			new_track->SetFrameRate(iter.second->GetFrameRate());
+
+		}
+		else if(media_track->GetMediaType() == common::MediaType::Audio)
+		{
+			new_track->SetSampleRate(iter.second->GetAudioSampleRate());
+			new_track->GetSample().SetFormat(iter.second->GetAudioSample().GetFormat());
+			new_track->GetChannel().SetLayout(iter.second->GetAudioChannel().GetLayout());
+		}
+		else
+		{
+			OV_ASSERT2(false);
+			continue;
+		}
+
+		for(auto stream_track : _stream_tracks)
+		{
+			auto it = find(stream_track.second.begin(), stream_track.second.end(), iter.first);
+			if(it == stream_track.second.end())
+			{
+				continue;
+			}
+
+			auto item = _stream_info_outputs.find(stream_track.first);
+			if(item == _stream_info_outputs.end())
+			{
+				OV_ASSERT2(false);
+				continue;
+			}
+			item->second->AddTrack(new_track);
+			logti("stream_name(%s), track_id(%d)", stream_track.first.CStr(), iter.first);
+		}
+
+		// av_log_set_level(AV_LOG_DEBUG);
+		CreateEncoder(new_track, iter.second);
+	}
+}
+
+void TranscodeStream::CreateFilters(std::shared_ptr<MediaTrack> media_track, MediaFrame *buffer)
+{
+	for(auto &context_item : _contexts)
+	{
+		if(media_track->GetMediaType() != context_item.second->GetMediaType())
+		{
+			continue;
+		}
+
+		if(media_track->GetMediaType() == common::MediaType::Video)
+		{
+			media_track->SetWidth(buffer->GetWidth());
+			media_track->SetHeight(buffer->GetHeight());
+		}
+		else if(media_track->GetMediaType() == common::MediaType::Audio)
+		{
+			media_track->SetSampleRate(buffer->GetSampleRate());
+			media_track->GetSample().SetFormat(buffer->GetFormat<common::AudioSample::Format>());
+			media_track->GetChannel().SetLayout(buffer->GetChannelLayout());
+		}
+		else
+		{
+			OV_ASSERT2(false);
+			continue;
+		}
+
+		_filters[context_item.first] = std::make_unique<TranscodeFilter>(media_track, context_item.second);
+	}
+}
+
+void TranscodeStream::DoFilters(std::unique_ptr<MediaFrame> frame)
+{
+	// 패킷의 트랙 아이디를 조회
+	int32_t track_id = frame->GetTrackId();
+
+	for(auto &iter: _contexts)
+	{
+		if(track_id != (int32_t)iter.second->GetMediaType())
+		{
+			continue;
+		}
+
+		auto frame_clone = frame->CloneFrame();
+		if(frame_clone == nullptr)
+		{
+			logte("FilterTask -> Unknown Frame");
+			continue;
+		}
+
+		FilterFrame(iter.first, std::move(frame_clone));
+	}
+}
+
+uint8_t TranscodeStream::AddContext(common::MediaType media_type, std::shared_ptr<TranscodeContext> context)
+{
+	uint8_t last_index = 0;
+	// 96-127 dynamic : RTP Payload Types for standard audio and video encodings
+	if(media_type == common::MediaType::Video)
+	{
+		// 0x60 ~ 0x6F
+		if(_last_track_video >= 0x70)
+		{
+			logte("The number of video encoders that can be supported is 16");
+			return 0;
+		}
+		last_index = _last_track_video;
+		++_last_track_video;
+	}
+	else if(media_type == common::MediaType::Audio)
+	{
+		// 0x70 ~ 0x7F
+		if(_last_track_audio > 0x7F)
+		{
+			logte("The number of audio encoders that can be supported is 16");
+			return 0;
+		}
+		last_index = _last_track_audio;
+		++_last_track_audio;
+	}
+	_contexts[last_index] = context;
+
+	return last_index;
 }

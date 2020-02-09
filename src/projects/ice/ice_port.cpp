@@ -15,12 +15,15 @@
 #include <algorithm>
 
 #include <base/ovlibrary/ovlibrary.h>
+#include <config/config.h>
+#include <rtc_signalling/rtc_ice_candidate.h>
 
 IcePort::IcePort()
 {
-	_timer.Push([this](void *paramter) -> void
+	_timer.Push([this](void *paramter) -> bool
 	            {
 		            CheckTimedoutItem();
+		            return true;
 	            }, nullptr, 1000, true);
 	_timer.Start();
 }
@@ -29,34 +32,124 @@ IcePort::~IcePort()
 {
 	_timer.Stop();
 
-	if(_physical_port != nullptr)
-	{
-		_physical_port->Close();
-	}
+	Close();
 }
 
-bool IcePort::Create(ov::SocketType type, const ov::SocketAddress &address)
+bool IcePort::Create(std::vector<RtcIceCandidate> ice_candidate_list)
 {
-	if(_physical_port != nullptr)
+	std::lock_guard<std::recursive_mutex> lock_guard(_physical_port_list_mutex);
+
+	if(_physical_port_list.empty() == false)
 	{
 		logtw("IcePort is running");
 		return false;
 	}
 
-	_physical_port = PhysicalPortManager::Instance()->CreatePort(type, address);
-	_physical_port->AddObserver(this);
+	bool succeeded = true;
+	std::map<int, bool> bounded;
 
-	return true;
+	for(auto &ice_candidate: ice_candidate_list)
+	{
+		auto transport = ice_candidate.GetTransport().UpperCaseString();
+		auto address = ice_candidate.GetAddress();
+		ov::SocketType socket_type = ov::SocketType::Udp;
+
+		if(transport == "TCP")
+		{
+			socket_type = ov::SocketType::Tcp;
+		}
+
+		{
+			auto port = address.Port();
+			auto item = bounded.find(port);
+
+			if(item != bounded.end())
+			{
+				// Already opened
+				continue;
+			}
+
+			bounded[port] = true;
+		}
+
+		// Bind to 0.0.0.0
+		address.SetHostname(nullptr);
+
+		// Create an ICE port using candidate information
+		auto physical_port = CreatePhysicalPort(address, socket_type);
+
+		if(physical_port == nullptr)
+		{
+			logte("Could not create physical port for %s/%s", address.ToString().CStr(), transport.CStr());
+			succeeded = false;
+			break;
+		}
+
+		logti("ICE port is bounded on %s/%s", address.ToString().CStr(), transport.CStr());
+		_physical_port_list.push_back(physical_port);
+	}
+
+	if(succeeded)
+	{
+		_ice_candidate_list = std::move(ice_candidate_list);
+	}
+	else
+	{
+		Close();
+	}
+
+	return succeeded;
+}
+
+const std::vector<RtcIceCandidate> &IcePort::GetIceCandidateList() const
+{
+	return _ice_candidate_list;
+}
+
+std::shared_ptr<PhysicalPort> IcePort::CreatePhysicalPort(const ov::SocketAddress &address, ov::SocketType type)
+{
+	auto physical_port = PhysicalPortManager::Instance()->CreatePort(type, address);
+
+	if(physical_port != nullptr)
+	{
+		if(physical_port->AddObserver(this))
+		{
+			return physical_port;
+		}
+
+		logte("Cannot add a observer %p to %p", this, physical_port.get());
+
+		PhysicalPortManager::Instance()->DeletePort(physical_port);
+	}
+	else
+	{
+		logte("Cannot create physical port for %s (type: %d)", address.ToString().CStr(), type);
+	}
+
+	return nullptr;
 }
 
 bool IcePort::Close()
 {
-	if(_physical_port->Close())
+	std::lock_guard<std::recursive_mutex> lock_guard(_physical_port_list_mutex);
+
+	bool result = true;
+
+	for(auto &physical_port : _physical_port_list)
 	{
-		return true;
+		result = result && physical_port->RemoveObserver(this);
+		result = result && PhysicalPortManager::Instance()->DeletePort(physical_port);
+
+		if(result == false)
+		{
+			logte("Cannot close ICE port");
+			break;
+		}
 	}
 
-	return false;
+	_ice_candidate_list.clear();
+
+	return result;
 }
 
 ov::String IcePort::GenerateUfrag()
@@ -158,24 +251,40 @@ void IcePort::AddSession(const std::shared_ptr<SessionInfo> &session_info, std::
 	SetIceState(_user_mapping_table[local_ufrag], IcePortConnectionState::New);
 }
 
+bool IcePort::RemoveSession(const session_id_t session_id)
+{
+	std::shared_ptr<IcePortInfo> ice_port_info;
+
+	{
+		std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+		auto item = _session_table.find(session_id);
+
+		if(item == _session_table.end())
+		{
+			logtw("Could not find session: %d", session_id);
+
+			return false;
+		}
+
+		ice_port_info = item->second;
+
+		_session_table.erase(item);
+		_ice_port_info.erase(ice_port_info->address);
+	}
+
+	{
+		std::lock_guard<std::mutex> lock_guard(_user_mapping_table_mutex);
+		_user_mapping_table.erase(ice_port_info->offer_sdp->GetIceUfrag());
+	}
+
+	return true;
+}
+
 bool IcePort::RemoveSession(const std::shared_ptr<SessionInfo> &session_info)
 {
 	session_id_t session_id = session_info->GetId();
-
-	auto item = _session_table.find(session_id);
-
-	if(item == _session_table.end())
-	{
-		logtw("Could not find session: %d", session_id);
-
-		return false;
-	}
-
-	_session_table.erase(item);
-	_ice_port_info.erase(item->second->address);
-	_user_mapping_table.erase(item->second->offer_sdp->GetIceUfrag());
-
-	return true;
+	return RemoveSession(session_id);
 }
 
 bool IcePort::Send(const std::shared_ptr<SessionInfo> &session_info, std::unique_ptr<RtpPacket> packet)
@@ -192,24 +301,32 @@ bool IcePort::Send(const std::shared_ptr<SessionInfo> &session_info, const std::
 {
 	// logtd("Finding socket from session #%d...", session_info->GetId());
 
-	auto item = _session_table.find(session_info->GetId());
+	std::shared_ptr<IcePortInfo> ice_port_info;
 
-	if(item == _session_table.end())
 	{
-		// logtw("ClientSocket not found for session #%d", session_info->GetId());
-		return false;
+		std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+		auto item = _session_table.find(session_info->GetId());
+
+		if(item == _session_table.end())
+		{
+			// logtw("ClientSocket not found for session #%d", session_info->GetId());
+			return false;
+		}
+
+		ice_port_info = item->second;
 	}
 
 	// logtd("Sending data to remote for session #%d", session_info->GetId());
-	return item->second->remote->SendTo(item->second->address, data) >= 0;
+	return ice_port_info->remote->SendTo(ice_port_info->address, data) >= 0;
 }
 
-void IcePort::OnConnected(ov::Socket *remote)
+void IcePort::OnConnected(const std::shared_ptr<ov::Socket> &remote)
 {
 	// TODO: 일단은 UDP만 처리하므로, 비워둠. 나중에 TCP 지원할 때 구현해야 함
 }
 
-void IcePort::OnDataReceived(ov::Socket *remote, const ov::SocketAddress &address, const std::shared_ptr<const ov::Data> &data)
+void IcePort::OnDataReceived(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const std::shared_ptr<const ov::Data> &data)
 {
 	// 데이터를 수신했음
 
@@ -265,9 +382,20 @@ void IcePort::OnDataReceived(ov::Socket *remote, const ov::SocketAddress &addres
 	{
 		logtd("Not Stun packet. Passing data to observer...");
 
-		auto item = _ice_port_info.find(address);
+		std::shared_ptr<IcePortInfo> ice_port_info;
 
-		if(item == _ice_port_info.end())
+		{
+			std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+			auto item = _ice_port_info.find(address);
+
+			if(item != _ice_port_info.end())
+			{
+				ice_port_info = item->second;
+			}
+		}
+
+		if(ice_port_info == nullptr)
 		{
 			// 포트 정보가 없음
 			// 이전 단계에서 관련 정보가 저장되어 있어야 함
@@ -281,7 +409,7 @@ void IcePort::OnDataReceived(ov::Socket *remote, const ov::SocketAddress &addres
 		for(auto &observer : _observers)
 		{
 			logtd("Trying to callback OnDataReceived() to %p...", observer.get());
-			observer->OnDataReceived(*this, item->second->session_info, data);
+			observer->OnDataReceived(*this, ice_port_info->session_info, data);
 			logtd("OnDataReceived() is returned (%p)", observer.get());
 		}
 	}
@@ -289,28 +417,41 @@ void IcePort::OnDataReceived(ov::Socket *remote, const ov::SocketAddress &addres
 
 void IcePort::CheckTimedoutItem()
 {
-	std::lock_guard<std::mutex> lock_guard(_user_mapping_table_mutex);
+	std::vector<std::shared_ptr<IcePortInfo>> delete_list;
 
-	for(auto item = _user_mapping_table.begin(); item != _user_mapping_table.end();)
 	{
-		if(item->second->IsExpired())
+		std::lock_guard<std::mutex> lock_guard(_user_mapping_table_mutex);
+
+		for(auto item = _user_mapping_table.begin(); item != _user_mapping_table.end();)
 		{
-			logtd("Client %s(session id: %d) is expired", item->second->address.ToString().CStr(), item->second->session_info->GetId());
-			SetIceState(item->second, IcePortConnectionState::Disconnected);
+			if(item->second->IsExpired())
+			{
+				logtd("Client %s(session id: %d) is expired", item->second->address.ToString().CStr(), item->second->session_info->GetId());
+				SetIceState(item->second, IcePortConnectionState::Disconnected);
 
-			_session_table.erase(item->second->session_info->GetId());
-			_ice_port_info.erase(item->second->address);
+				delete_list.push_back(item->second);
 
-			item = _user_mapping_table.erase(item);
+				item = _user_mapping_table.erase(item);
+			}
+			else
+			{
+				++item;
+			}
 		}
-		else
+	}
+
+	{
+		std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+		for(auto &deleted_ice_port : delete_list)
 		{
-			++item;
+			_session_table.erase(deleted_ice_port->session_info->GetId());
+			_ice_port_info.erase(deleted_ice_port->address);
 		}
 	}
 }
 
-bool IcePort::ProcessBindingRequest(ov::Socket *remote, const ov::SocketAddress &address, const StunMessage &request_message)
+bool IcePort::ProcessBindingRequest(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const StunMessage &request_message)
 {
 	// Binding Request
 	ov::String local_ufrag;
@@ -324,57 +465,69 @@ bool IcePort::ProcessBindingRequest(ov::Socket *remote, const ov::SocketAddress 
 
 	logtd("Binding request for user: %s:%s", local_ufrag.CStr(), remote_ufrag.CStr());
 
-	auto info = _user_mapping_table.find(local_ufrag);
-	if(info == _user_mapping_table.end())
+	std::shared_ptr<IcePortInfo> ice_port_info;
+
 	{
-		logtd("User not found: %s (AddSession() needed)", local_ufrag.CStr());
-		return false;
+		std::lock_guard<std::mutex> lock_guard(_user_mapping_table_mutex);
+
+		auto info = _user_mapping_table.find(local_ufrag);
+
+		if(info == _user_mapping_table.end())
+		{
+			logtd("User not found: %s (AddSession() needed)", local_ufrag.CStr());
+			return false;
+		}
+
+		ice_port_info = info->second;
 	}
 
-	if(info->second->peer_sdp->GetIceUfrag() != remote_ufrag)
+	if(ice_port_info->peer_sdp->GetIceUfrag() != remote_ufrag)
 	{
 		// SDP에 명시된 ufrag와, 실제 STUN으로 들어온 ufrag가 다름
-		logtw("Mismatched ufrag: %s (ufrag in peer SDP: %s)", remote_ufrag.CStr(), info->second->peer_sdp->GetIceUfrag().CStr());
+		logtw("Mismatched ufrag: %s (ufrag in peer SDP: %s)", remote_ufrag.CStr(), ice_port_info->peer_sdp->GetIceUfrag().CStr());
 
 		// TODO: SDP 파싱 기능이 완료되면 처리해야 함
 		// return false;
 	}
 
 	// SDP의 password로 무결성 검사를 한 뒤
-	if(request_message.CheckIntegrity(info->second->offer_sdp->GetIcePwd()) == false)
+	if(request_message.CheckIntegrity(ice_port_info->offer_sdp->GetIcePwd()) == false)
 	{
 		// 무결성 검사 실패
 		logtw("Failed to check integrity");
 
-		SetIceState(info->second, IcePortConnectionState::Failed);
+		SetIceState(ice_port_info, IcePortConnectionState::Failed);
 
 		{
 			std::lock_guard<std::mutex> lock_guard(_user_mapping_table_mutex);
 
-			_user_mapping_table.erase(info);
-			_ice_port_info.erase(info->second->address);
-			_session_table.erase(info->second->session_info->GetId());
+			_user_mapping_table.erase(local_ufrag);
+		}
 
-			// TODO(dimiden): _ice_port_info 및 _session_table 도 같이 정리
+		{
+			std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+			_ice_port_info.erase(ice_port_info->address);
+			_session_table.erase(ice_port_info->session_info->GetId());
 		}
 
 		return false;
 	}
 
-	info->second->UpdateBindingTime();
+	ice_port_info->UpdateBindingTime();
 
-	if(info->second->state == IcePortConnectionState::New)
+	if(ice_port_info->state == IcePortConnectionState::New)
 	{
 		// 다음 Binding Request까지 Checking 상태 유지
-		SetIceState(info->second, IcePortConnectionState::Checking);
-		info->second->remote = remote;
-		info->second->address = address;
+		SetIceState(ice_port_info, IcePortConnectionState::Checking);
+		ice_port_info->remote = remote;
+		ice_port_info->address = address;
 	}
 
-	return SendBindingResponse(remote, address, request_message, info->second);
+	return SendBindingResponse(remote, address, request_message, ice_port_info);
 }
 
-bool IcePort::SendBindingResponse(ov::Socket *remote, const ov::SocketAddress &address, const StunMessage &request_message, const std::shared_ptr<IcePortInfo> &info)
+bool IcePort::SendBindingResponse(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const StunMessage &request_message, const std::shared_ptr<IcePortInfo> &info)
 {
 	// Binding response 준비
 	StunMessage response_message;
@@ -386,7 +539,6 @@ bool IcePort::SendBindingResponse(ov::Socket *remote, const ov::SocketAddress &a
 	std::unique_ptr<StunAttribute> attribute;
 
 	// XOR-MAPPED-ADDRESS attribute 추가
-	const sockaddr_in *addr_in = address.AddressForIPv4();
 	attribute = std::make_unique<StunXorMappedAddressAttribute>();
 	auto *mapped_attribute = dynamic_cast<StunXorMappedAddressAttribute *>(attribute.get());
 
@@ -404,15 +556,26 @@ bool IcePort::SendBindingResponse(ov::Socket *remote, const ov::SocketAddress &a
 	remote->SendTo(address, serialized);
 
 	// client mapping 정보를 저장해놓음
-	_ice_port_info[address] = info;
-	_session_table[info->session_info->GetId()] = info;
+	{
+		std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+		if(_session_table.find(info->session_info->GetId()) == _session_table.end())
+		{
+			_ice_port_info[address] = info;
+			_session_table[info->session_info->GetId()] = info;
+		}
+		else
+		{
+			// Updated
+		}
+	}
 
 	SendBindingRequest(remote, address, info);
 
 	return true;
 }
 
-bool IcePort::SendBindingRequest(ov::Socket *remote, const ov::SocketAddress &address, const std::shared_ptr<IcePortInfo> &info)
+bool IcePort::SendBindingRequest(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const std::shared_ptr<IcePortInfo> &info)
 {
 	// Binding request 준비
 	StunMessage request_message;
@@ -480,38 +643,46 @@ bool IcePort::SendBindingRequest(ov::Socket *remote, const ov::SocketAddress &ad
 	return true;
 }
 
-bool IcePort::ProcessBindingResponse(ov::Socket *remote, const ov::SocketAddress &address, const StunMessage &response_message)
+bool IcePort::ProcessBindingResponse(const std::shared_ptr<ov::Socket> &remote, const ov::SocketAddress &address, const StunMessage &response_message)
 {
 	// TODO: state가 checking 상태인지 확인
 
-	auto item = _ice_port_info.find(address);
+	std::shared_ptr<IcePortInfo> ice_port_info;
 
-	if(item == _ice_port_info.end())
 	{
-		// 포트 정보가 없음
-		// 이전 단계에서 관련 정보가 저장되어 있어야 함
-		logtw("Could not find client information");
-		return false;
+		std::lock_guard<std::mutex> lock_guard(_ice_port_info_mutex);
+
+		auto item = _ice_port_info.find(address);
+
+		if(item == _ice_port_info.end())
+		{
+			// 포트 정보가 없음
+			// 이전 단계에서 관련 정보가 저장되어 있어야 함
+			logtw("Could not find client information");
+			return false;
+		}
+
+		ice_port_info = item->second;
 	}
 
 	// SDP의 password로 무결성 검사를 한 뒤
-	if(response_message.CheckIntegrity(item->second->offer_sdp->GetIcePwd()) == false)
+	if(response_message.CheckIntegrity(ice_port_info->offer_sdp->GetIcePwd()) == false)
 	{
 		// 무결성 검사 실패
 		logtw("Failed to check integrity");
 		return false;
 	}
 
-	if(item->second->state != IcePortConnectionState::Connected)
+	if(ice_port_info->state != IcePortConnectionState::Connected)
 	{
 		// 다음 Binding Request까지 Checking 상태 유지
-		SetIceState(item->second, IcePortConnectionState::Connected);
+		SetIceState(ice_port_info, IcePortConnectionState::Connected);
 	}
 
 	return true;
 }
 
-void IcePort::OnDisconnected(ov::Socket *remote, PhysicalPortDisconnectReason reason, const std::shared_ptr<const ov::Error> &error)
+void IcePort::OnDisconnected(const std::shared_ptr<ov::Socket> &remote, PhysicalPortDisconnectReason reason, const std::shared_ptr<const ov::Error> &error)
 {
 	// TODO: TCP 연결이 해제되었을 때 처리. 일단은 UDP만 처리하므로, 비워둠
 }
@@ -525,21 +696,12 @@ void IcePort::SetIceState(std::shared_ptr<IcePortInfo> &info, IcePortConnectionS
 }
 
 // STUN 오류를 반환함
-void IcePort::ResponseError(ov::Socket *remote)
+void IcePort::ResponseError(const std::shared_ptr<ov::Socket> &remote)
 {
 	// TOOD: 구현 필요 - chrome에서는 오류가 발생했을 때, 별다른 조치를 취하지 않는 것 같음
 }
 
 ov::String IcePort::ToString() const
 {
-	if(_physical_port == nullptr)
-	{
-		return ov::String::FormatString("<IcePort: %p, [Invalid physical port]>", this);
-	}
-
-	return ov::String::FormatString("<IcePort: %p, %s - %s>",
-	                                this,
-	                                (_physical_port->GetType() == ov::SocketType::Tcp) ? "TCP" : ((_physical_port->GetType() == ov::SocketType::Udp) ? "UDP" : "Unknown"),
-	                                _physical_port->GetAddress().ToString().CStr()
-	);
+	return ov::String::FormatString("<IcePort: %p, %zu ports>", this, _physical_port_list.size());
 }

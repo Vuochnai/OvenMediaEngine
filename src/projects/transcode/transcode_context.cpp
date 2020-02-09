@@ -16,67 +16,46 @@
 
 TranscodeContext::TranscodeContext()
 {
-	SetAudioTimeBase(1, 1000000);
-	SetVideoTimeBase(1, 1000000);
+	SetTimeBase(1, 1000000);
 }
 
 TranscodeContext::~TranscodeContext()
 {
 }
 
-void TranscodeContext::SetVideoCodecId(MediaCommonType::MediaCodecId val)
+void TranscodeContext::SetCodecId(common::MediaCodecId val)
 {
-	_video_codec_id = val;
+	_codec_id = val;
 }
 
-MediaCommonType::MediaCodecId TranscodeContext::GetVideoCodecId()
+common::MediaCodecId TranscodeContext::GetCodecId()
 {
-	return _video_codec_id;
+	return _codec_id;
 }
 
-void TranscodeContext::SetAudioCodecId(MediaCommonType::MediaCodecId val)
+void TranscodeContext::SetBitrate(int32_t val)
 {
-	_audio_codec_id = val;
+	_bitrate = val;
 }
 
-MediaCommonType::MediaCodecId TranscodeContext::GetAudioCodecId()
+int32_t TranscodeContext::GetBitrate()
 {
-	return _audio_codec_id;
+	return _bitrate;
 }
 
-void TranscodeContext::SetVideoBitrate(int32_t val)
-{
-	_video_bitrate = val;
-}
-
-int32_t TranscodeContext::GetVideoBitrate()
-{
-	return _video_bitrate;
-}
-
-void TranscodeContext::SetAudioBitrate(int32_t val)
-{
-	_audio_bitrate = val;
-}
-
-int32_t TranscodeContext::GetAudioBitrate()
-{
-	return _audio_bitrate;
-}
-
-void TranscodeContext::SetAudioSample(MediaCommonType::AudioSample sample)
+void TranscodeContext::SetAudioSample(common::AudioSample sample)
 {
 	_audio_sample = sample;
 }
 
-MediaCommonType::AudioSample TranscodeContext::GetAudioSample() const
+common::AudioSample TranscodeContext::GetAudioSample() const
 {
 	return _audio_sample;
 }
 
 void TranscodeContext::SetAudioSampleRate(int32_t val)
 {
-	_audio_sample.SetRate((MediaCommonType::AudioSample::Rate)val);
+	_audio_sample.SetRate((common::AudioSample::Rate)val);
 	// _audio_sample_rate = val;
 }
 
@@ -115,26 +94,15 @@ float TranscodeContext::GetFrameRate()
 	return _video_frame_rate;
 }
 
-MediaCommonType::Timebase &TranscodeContext::GetVideoTimeBase()
+common::Timebase &TranscodeContext::GetTimeBase()
 {
-	return _video_time_base;
+	return _time_base;
 }
 
-void TranscodeContext::SetVideoTimeBase(int32_t num, int32_t den)
+void TranscodeContext::SetTimeBase(int32_t num, int32_t den)
 {
-	_video_time_base.Set(num, den);
+	_time_base.Set(num, den);
 }
-
-MediaCommonType::Timebase &TranscodeContext::GetAudioTimeBase()
-{
-	return _audio_time_base;
-}
-
-void TranscodeContext::SetAudioTimeBase(int32_t num, int32_t den)
-{
-	_audio_time_base.Set(num, den);
-}
-
 
 void TranscodeContext::SetGOP(int32_t val)
 {
@@ -146,17 +114,23 @@ int32_t TranscodeContext::GetGOP()
 	return _video_gop;
 }
 
-void TranscodeContext::SetAudioSampleFormat(MediaCommonType::AudioSample::Format val)
+void TranscodeContext::SetAudioSampleFormat(common::AudioSample::Format val)
 {
 	_audio_sample.SetFormat(val);
 }
 
-MediaCommonType::AudioChannel &TranscodeContext::GetAudioChannel()
+common::AudioChannel &TranscodeContext::GetAudioChannel()
 {
 	return _audio_channel;
 }
 
-const MediaCommonType::AudioChannel &TranscodeContext::GetAudioChannel() const
+const common::AudioChannel &TranscodeContext::GetAudioChannel() const
 {
 	return _audio_channel;
 }
+
+common::MediaType TranscodeContext::GetMediaType() const
+{
+	return _media_type;
+}
+

@@ -27,6 +27,8 @@
 #include "codec/transcode_encoder.h"
 #include "codec/transcode_decoder.h"
 
+#include <base/application/application.h>
+
 class TranscodeApplication;
 
 typedef int32_t MediaTrackId;
@@ -34,23 +36,19 @@ typedef int32_t MediaTrackId;
 class TranscodeStream
 {
 public:
-	TranscodeStream(std::shared_ptr<StreamInfo> orig_stream_info, TranscodeApplication *parent);
+	TranscodeStream(const info::Application *application_info, std::shared_ptr<StreamInfo> orig_stream_info, TranscodeApplication *parent);
 	~TranscodeStream();
 
 	void Stop();
 
 	bool Push(std::unique_ptr<MediaPacket> packet);
-	uint32_t GetBufferCount();
 
-	std::shared_ptr<StreamInfo> GetStreamInfo();
+	static std::map<uint32_t, std::set<ov::String>> _stream_list;
 
 private:
 
 	// 입력 스트림 정보
 	std::shared_ptr<StreamInfo> _stream_info_input;
-
-	// 출력(변화된) 스트림 정보
-	std::shared_ptr<StreamInfo> _stream_info_output;
 
 	// 미디어 인코딩된 원본 패킷 버퍼
 	MediaQueue<std::unique_ptr<MediaPacket>> _queue;
@@ -61,10 +59,12 @@ private:
 	// 필터링된 프레임 버퍼
 	MediaQueue<std::unique_ptr<MediaFrame>> _queue_filterd;
 
+	// 96-127 dynamic : RTP Payload Types for standard audio and video encodings
+	uint8_t _last_track_video = 0x60;     // 0x60 ~ 0x6F
+	uint8_t _last_track_audio = 0x70;     // 0x70 ~ 0x7F
 
 private:
-	// 트랜스코딩 코덱 변환 정보
-	std::shared_ptr<TranscodeContext> _transcode_context;
+	const info::Application *_application_info;
 
 	// 디코더
 	std::map<MediaTrackId, std::unique_ptr<TranscodeDecoder>> _decoders;
@@ -74,6 +74,9 @@ private:
 
 	// 필터
 	std::map<MediaTrackId, std::unique_ptr<TranscodeFilter>> _filters;
+
+	// 스트림별 트랙집합
+	std::map <ov::String, std::vector <uint8_t >> _stream_tracks;
 
 
 private:
@@ -94,21 +97,45 @@ private:
 	void CreateDecoder(int32_t track_id);
 
 	// 인코더 생성
+	void CreateEncoders(std::shared_ptr<MediaTrack> media_track);
 	void CreateEncoder(std::shared_ptr<MediaTrack> media_track, std::shared_ptr<TranscodeContext> transcode_context);
 
 	// 디코딩된 프레임의 포맷이 분석되거나 변경될 경우 호출됨.
 	void ChangeOutputFormat(MediaFrame *buffer);
 
-	// 1. 디코딩
-	TranscodeResult do_decode(int32_t track_id, std::unique_ptr<const MediaPacket> packet);
-	// 2. 필터링
-	TranscodeResult do_filter(int32_t track_id, std::unique_ptr<MediaFrame> frame);
-	// 3. 인코딩
-	TranscodeResult do_encode(int32_t track_id, std::unique_ptr<const MediaFrame> frame);
+	void CreateFilters(std::shared_ptr<MediaTrack> media_track, MediaFrame *buffer);
+	void DoFilters(std::unique_ptr<MediaFrame> frame);
 
+	// 1. 디코딩
+	TranscodeResult DecodePacket(int32_t track_id, std::unique_ptr<const MediaPacket> packet);
+	// 2. 필터링
+	TranscodeResult FilterFrame(int32_t track_id, std::unique_ptr<MediaFrame> frame);
+	// 3. 인코딩
+	TranscodeResult EncodeFrame(int32_t track_id, std::unique_ptr<const MediaFrame> frame);
+
+	// 출력(변화된) 스트림 정보
+	bool AddStreamInfoOutput(ov::String stream_name);
+	std::map<ov::String, std::shared_ptr<StreamInfo>> _stream_info_outputs;
+
+	// 트랜스코딩 코덱 변환 정보
+	uint8_t AddContext(common::MediaType media_type, std::shared_ptr<TranscodeContext> context);
+	std::map<MediaTrackId, std::shared_ptr<TranscodeContext>> _contexts;
+
+	// Create output streams
+	void CreateStreams();
+
+	// Delete output streams
+	void DeleteStreams();
+
+	// Send frame with output stream's information
+	void SendFrame(std::unique_ptr<MediaPacket> packet);
 
 	// 통계 정보
 private:
 	uint32_t _stats_decoded_frame_count;
+
+	uint8_t _stats_queue_full_count;
+
+	uint64_t _max_queue_size;
 };
 

@@ -26,6 +26,11 @@ namespace ov
 			return ov::String::FormatString("%d", number);
 		}
 
+		static ov::String ToString(const ov::String &str)
+		{
+			return str;
+		}
+
 		static ov::String ToString(unsigned int number)
 		{
 			return ov::String::FormatString("%u", number);
@@ -148,11 +153,27 @@ namespace ov
 			}
 		}
 
+		static bool ToBool(const ov::String &str)
+		{
+			ov::String value = str.LowerCaseString();
+
+			if(str == "true")
+			{
+				return true;
+			}
+			else if(str == "false")
+			{
+				return false;
+			}
+
+			return (ToInt64(str) != 0);
+		}
+
 		static float ToFloat(const ov::String &str)
 		{
 			try
 			{
-				std::stof(str.CStr(), nullptr);
+				return std::stof(str.CStr(), nullptr);
 			}
 			catch(std::invalid_argument &e)
 			{

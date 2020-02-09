@@ -53,14 +53,14 @@ namespace ov
 		return bio_methods;
 	}
 
-	bool Tls::Initialize(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const ov::String &cipher_list, TlsCallback callback)
+	bool Tls::Initialize(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const std::shared_ptr<Certificate> &chain_certificate, const ov::String &cipher_list, TlsCallback callback)
 	{
 		bool result = true;
 
 		_callback = std::move(callback);
 
 		// Create SSL_CTX
-		result = result && PrepareSslContext(method, certificate, cipher_list);
+		result = result && PrepareSslContext(method, certificate, chain_certificate, cipher_list);
 		// Create BIO
 		result = result && PrepareBio();
 		// Create SSL
@@ -74,7 +74,7 @@ namespace ov
 		return result;
 	};
 
-	bool Tls::PrepareSslContext(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const ov::String &cipher_list)
+	bool Tls::PrepareSslContext(const SSL_METHOD *method, const std::shared_ptr<Certificate> &certificate, const std::shared_ptr<Certificate> &chain_certificate, const ov::String &cipher_list)
 	{
 		do
 		{
@@ -91,13 +91,20 @@ namespace ov
 
 			if(::SSL_CTX_use_certificate(ctx, certificate->GetX509()) != 1)
 			{
-				logte("Configuring cert to ctx failed");
+				logte("Cannot use certficate: %s", ov::Error::CreateErrorFromOpenSsl()->ToString().CStr());
+				break;
+			}
+
+			if((chain_certificate != nullptr) && (::SSL_CTX_add1_chain_cert(ctx, chain_certificate->GetX509()) != 1))
+			{
+				logte("Cannot use chain certificate: %s", ov::Error::CreateErrorFromOpenSsl()->ToString().CStr());
+
 				break;
 			}
 
 			if(::SSL_CTX_use_PrivateKey(ctx, certificate->GetPkey()) != 1)
 			{
-				logte("Configuring pkey to ctx failed");
+				logte("Cannot use private key: %s", ov::Error::CreateErrorFromOpenSsl()->ToString().CStr());
 				break;
 			}
 
@@ -280,7 +287,11 @@ namespace ov
 
 	int Tls::Accept()
 	{
-		OV_ASSERT2(_ssl != nullptr);
+	    if(_ssl == nullptr)
+        {
+            logte("Ssl is null");
+            return -1;
+        }
 
 		int result = ::SSL_accept(_ssl);
 
@@ -314,7 +325,7 @@ namespace ov
 
 			default:
 				// Another error
-				logte("An error occurred while accept SSL connection: code: %d, error: %d (errno: %d)", result, error, errno);
+				logte("An error occurred while accept SSL connection: %s", ov::Error::CreateErrorFromOpenSsl()->ToString().CStr());
 				// OV_ASSERT2(false);
 				break;
 		}
@@ -390,24 +401,32 @@ namespace ov
 	{
 		OV_ASSERT2(_ssl != nullptr);
 
-		int result = ::SSL_write(_ssl, data, static_cast<int>(length));
+		size_t write_size = 0;
 
-		if(result > 0)
+        do
+        {
+            // max 16384(2^14)byte write
+            int result = ::SSL_write(_ssl, (void *)((char *)data + write_size), static_cast<int>(length - write_size));
+
+            if(result <= 0)
+            {
+                // The write operation was not successful, because either the connection was closed,
+                // an error occurred or action must be taken by the calling process.
+                // Call SSL_get_error() with the return value ret to find out the reason.
+                return GetError(result);
+            }
+
+            write_size +=  static_cast<size_t>(result);
+        }while(write_size < length);
+
+        // The write operation was successful,
+        // the return value is the number of bytes actually written to the TLS/SSL connection.
+        if (written_bytes != nullptr)
 		{
-			// The write operation was successful,
-			// the return value is the number of bytes actually written to the TLS/SSL connection.
-			if(written_bytes != nullptr)
-			{
-				*written_bytes = static_cast<size_t>(result);
-			}
-
-			return SSL_ERROR_NONE;
+        	*written_bytes += write_size;
 		}
 
-		// The write operation was not successful, because either the connection was closed,
-		// an error occurred or action must be taken by the calling process.
-		// Call SSL_get_error() with the return value ret to find out the reason.
-		return GetError(result);
+		return SSL_ERROR_NONE;
 	}
 
 	bool Tls::FlushInput()
@@ -452,7 +471,7 @@ namespace ov
 		::SSL_CTX_set_verify(_ssl_ctx, mode, nullptr);
 	}
 
-	std::shared_ptr<Certificate> Tls::GetPeerCertificate()
+	std::shared_ptr<Certificate> Tls::GetPeerCertificate() const
 	{
 		OV_ASSERT2(_ssl != nullptr);
 

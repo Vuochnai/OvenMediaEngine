@@ -8,10 +8,12 @@ LOCAL_STATIC_LIBRARIES := \
 	ice \
 	jsoncpp \
 	http_server \
+	relay \
 	dtls_srtp \
 	rtp_rtcp \
 	sdp \
 	publisher \
+	web_console \
 	mediarouter \
 	application \
 	physical_port \
@@ -20,6 +22,10 @@ LOCAL_STATIC_LIBRARIES := \
 	config \
 	ovlibrary \
 	rtmpprovider \
+	hls \
+	dash \
+	segment_stream \
+	monitoring \
 	jsoncpp \
 	sqlite
 
@@ -29,6 +35,7 @@ LOCAL_PREBUILT_LIBRARIES := \
 LOCAL_LDFLAGS := \
 	-lpthread \
 	-ldl \
+	`pkg-config --libs srt` \
 	`pkg-config --libs libavformat` \
 	`pkg-config --libs libavfilter` \
 	`pkg-config --libs libavcodec` \
@@ -40,6 +47,6 @@ LOCAL_LDFLAGS := \
 	`pkg-config --libs opus` \
 	`pkg-config --libs libsrtp2`
 
-LOCAL_TARGET := main
+LOCAL_TARGET := OvenMediaEngine
 
 include $(BUILD_EXECUTABLE)

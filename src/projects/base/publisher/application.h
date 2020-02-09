@@ -5,7 +5,6 @@
 #include "base/ovlibrary/string.h"
 #include "base/ovlibrary/semaphore.h"
 #include "config/config.h"
-#include "base/application/application_info.h"
 #include "base/application/stream_info.h"
 #include "base/media_route/media_route_application_observer.h"
 #include "stream.h"
@@ -18,7 +17,7 @@ enum ApplicationState
 	Error
 };
 
-class Application : public ApplicationInfo, public MediaRouteApplicationObserver
+class Application : public info::Application, public MediaRouteApplicationObserver
 {
 public:
 	// MediaRouteApplicationObserver Implementation
@@ -46,7 +45,7 @@ public:
 	std::shared_ptr<Stream> GetStream(ov::String stream_name);
 
 protected:
-	explicit Application(const std::shared_ptr<ApplicationInfo> &info);
+	explicit Application(const info::Application *application_info);
 	virtual ~Application();
 
 	virtual bool Start();
@@ -75,7 +74,7 @@ private:
 	// For child, 실제 구현부는 자식에서 처리한다.
 
 	// Stream을 자식을 통해 생성해서 받는다.
-	virtual std::shared_ptr<Stream> CreateStream(std::shared_ptr<StreamInfo> info) = 0;
+	virtual std::shared_ptr<Stream> CreateStream(std::shared_ptr<StreamInfo> info, uint32_t thread_count) = 0;
 	virtual bool DeleteStream(std::shared_ptr<StreamInfo> info) = 0;
 
 	// Audio Stream 전달 Interface를 구현해야 함

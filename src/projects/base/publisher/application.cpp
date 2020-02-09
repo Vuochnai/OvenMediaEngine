@@ -3,8 +3,8 @@
 
 #include <algorithm>
 
-Application::Application(const std::shared_ptr<ApplicationInfo> &info)
-	: ApplicationInfo(info)
+Application::Application(const info::Application *application_info)
+	: info::Application(*application_info)
 {
 	_stop_thread_flag = false;
 }
@@ -36,7 +36,9 @@ bool Application::Stop()
 bool Application::OnCreateStream(std::shared_ptr<StreamInfo> info)
 {
 	// Stream을 자식을 통해 생성해서 연결한다.
-	auto stream = CreateStream(info);
+	auto worker_count = GetThreadCount();
+	auto stream = CreateStream(info, worker_count);
+
 	if(!stream)
 	{
 		// Stream 생성 실패
@@ -63,13 +65,13 @@ bool Application::OnDeleteStream(std::shared_ptr<StreamInfo> info)
 		return false;
 	}
 
-	stream->Stop();
-
 	// Stream이 삭제되었음을 자식에게 알려서 처리하게 함
 	if(DeleteStream(info) == false)
 	{
 		return false;
 	}
+
+	stream->Stop();
 
 	_streams.erase(info->GetId());
 
@@ -263,6 +265,7 @@ void Application::WorkerThread()
 		//TODO: ApplicationModule을 호출한다.
 	}
 }
+
 
 void Application::SendVideoFrame(std::shared_ptr<StreamInfo> info,
                                  std::shared_ptr<MediaTrack> track,

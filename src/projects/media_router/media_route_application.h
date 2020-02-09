@@ -21,8 +21,13 @@
 
 #include "media_route_stream.h"
 
+#include <config/items/application.h>
+
 class ApplicationInfo;
 class StreamInfo;
+
+class RelayServer;
+class RelayClient;
 
 // -어플리케이션(Application) 별 스트림(Stream)을 관리해야 한다
 // - Publisher를 관리해야한다
@@ -32,13 +37,16 @@ class StreamInfo;
 
 // 1. Connect App에 접속되면 어플리케이션으로 할당함.
 
+// Stream timout for GarbageCollector
+# define TIMEOUT_STREAM_ALIVE   30
+
 class MediaRouteApplication : public MediaRouteApplicationInterface
 {
 public:
-	static std::shared_ptr<MediaRouteApplication> Create(const std::shared_ptr<ApplicationInfo> &appinfo);
+	static std::shared_ptr<MediaRouteApplication> Create(const info::Application *application_info);
 
-	MediaRouteApplication(const std::shared_ptr<ApplicationInfo> &appinfo);
-	~MediaRouteApplication();
+	explicit MediaRouteApplication(const info::Application *application_info);
+	~MediaRouteApplication() override;
 
 public:
 	bool Start();
@@ -86,16 +94,16 @@ public:
 
 
 public:
-	// 어플리케이션 정보
-	std::shared_ptr<ApplicationInfo> _application_info;
+	// Application information from configuration file
+	const info::Application *_application_info;
 
-	// Connector 인스턴스 정보
+	// Information of Connector instance
 	std::vector<std::shared_ptr<MediaRouteApplicationConnector>> _connectors;
 
-	// Observer 인ㅅ턴스 정보
+	// Information of Observer instance
 	std::vector<std::shared_ptr<MediaRouteApplicationObserver>> _observers;
 
-	// MediaStream 인스턴스 정보
+	// Information of MediaStream instance
 	// Key : StreamInfo.id
 	std::map<uint32_t, std::shared_ptr<MediaRouteStream>> _streams;
 
@@ -104,6 +112,16 @@ public:
 
 	void OnGarbageCollector();
 	void GarbageCollector();
+
+	const std::map<uint32_t, std::shared_ptr<MediaRouteStream>> GetStreams() const override
+	{
+		return _streams;
+	}
+
+	std::shared_ptr<RelayClient> GetOriginConnector() override
+	{
+		return _relay_client;
+	}
 
 	enum
 	{
@@ -121,7 +139,12 @@ public:
 		uint32_t _stream_id;
 	};
 
+
+protected:
 	// 버퍼를 처리할 인디게이터
 	MediaQueue<std::unique_ptr<BufferIndicator>> _indicator;
-};
 
+	std::shared_ptr<RelayServer>    _relay_server;
+	std::shared_ptr<RelayClient>    _relay_client;
+	ov::DelayQueue                  _retry_timer;
+};

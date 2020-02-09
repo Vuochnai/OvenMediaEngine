@@ -29,57 +29,47 @@ enum class FrameType : int8_t
 struct FragmentationHeader
 {
 public:
-	~FragmentationHeader()
-	{
-	}
-
 	// Number of fragmentations
 	uint16_t fragmentation_vector_size = 0;
 	// Offset of pointer to data for each
-	size_t fragmentation_offset[MAX_FRAG_COUNT];
+	size_t fragmentation_offset[MAX_FRAG_COUNT] {};
 
 	// fragmentation
 	// Data size for each fragmentation
-	size_t fragmentation_length[MAX_FRAG_COUNT];
+	size_t fragmentation_length[MAX_FRAG_COUNT] {};
 	// Timestamp difference relative "now" for each fragmentation
-	uint16_t fragmentation_time_diff[MAX_FRAG_COUNT];
+	uint16_t fragmentation_time_diff[MAX_FRAG_COUNT] {};
 	// Payload type of each fragmentation
-	uint8_t fragmentation_pl_type[MAX_FRAG_COUNT];
+	uint8_t fragmentation_pl_type[MAX_FRAG_COUNT] {};
 
 	void VerifyAndAllocateFragmentationHeader(const size_t size) {
-		const uint16_t size16 = static_cast<uint16_t>(size);
+		const auto size16 = static_cast<uint16_t>(size);
 		if (fragmentation_vector_size < size16) {
 			uint16_t oldVectorSize = fragmentation_vector_size;
 			{
 				// offset
 				size_t* oldOffsets = fragmentation_offset;
-				memset(fragmentation_offset + oldVectorSize, 0,
-				       sizeof(size_t) * (size16 - oldVectorSize));
+				memset(fragmentation_offset + oldVectorSize, 0, sizeof(size_t) * (size16 - oldVectorSize));
 				// copy old values
 				memcpy(fragmentation_offset, oldOffsets, sizeof(size_t) * oldVectorSize);
 			}
 			// length
 			{
 				size_t* oldLengths = fragmentation_length;
-				memset(fragmentation_length + oldVectorSize, 0,
-				       sizeof(size_t) * (size16 - oldVectorSize));
+				memset(fragmentation_length + oldVectorSize, 0, sizeof(size_t) * (size16 - oldVectorSize));
 				memcpy(fragmentation_length, oldLengths, sizeof(size_t) * oldVectorSize);
 			}
 			// time diff
 			{
 				uint16_t* oldTimeDiffs = fragmentation_time_diff;
-				memset(fragmentation_time_diff + oldVectorSize, 0,
-				       sizeof(uint16_t) * (size16 - oldVectorSize));
-				memcpy(fragmentation_time_diff, oldTimeDiffs,
-				       sizeof(uint16_t) * oldVectorSize);
+				memset(fragmentation_time_diff + oldVectorSize, 0, sizeof(uint16_t) * (size16 - oldVectorSize));
+				memcpy(fragmentation_time_diff, oldTimeDiffs, sizeof(uint16_t) * oldVectorSize);
 			}
-			// payload type
+			// Payload type
 			{
 				uint8_t* oldTimePlTypes = fragmentation_pl_type;
-				memset(fragmentation_pl_type + oldVectorSize, 0,
-				       sizeof(uint8_t) * (size16 - oldVectorSize));
-				memcpy(fragmentation_pl_type, oldTimePlTypes,
-				       sizeof(uint8_t) * oldVectorSize);
+				memset(fragmentation_pl_type + oldVectorSize, 0, sizeof(uint8_t) * (size16 - oldVectorSize));
+				memcpy(fragmentation_pl_type, oldTimePlTypes, sizeof(uint8_t) * oldVectorSize);
 			}
 			fragmentation_vector_size = size16;
 		}
@@ -89,21 +79,21 @@ public:
 struct EncodedFrame
 {
 public:
-	EncodedFrame(uint8_t *buffer, size_t length, size_t size)
-		: buffer(buffer), length(length), size(size)
+	EncodedFrame(std::shared_ptr<ov::Data> buffer, size_t length, size_t size)
+		: _buffer(buffer), _length(length), _size(size)
 	{
 	}
 
-	int32_t encoded_width = 0;
-	int32_t encoded_height = 0;
+	int32_t _encoded_width = 0;
+	int32_t _encoded_height = 0;
 
-	int32_t time_stamp = 0;
+	int64_t _time_stamp = 0;
 
-	FrameType frame_type = FrameType::VideoFrameDelta;
-	uint8_t *buffer = nullptr;
-	size_t length = 0;
-	size_t size = 0;
-	bool complete_frame = false;
+	FrameType _frame_type = FrameType::VideoFrameDelta;
+	std::shared_ptr<ov::Data> _buffer;
+	size_t _length = 0;
+	size_t _size = 0;
+	bool _complete_frame = false;
 };
 
 struct CodecSpecificInfoGeneric
@@ -117,10 +107,9 @@ static const int32_t kCodecTypeVideo = 0x20000000;
 enum class CodecType : int32_t
 {
 	// Audio Codecs
-		Opus = kCodecTypeAudio + 1,
-
+	Opus = kCodecTypeAudio + 1,
 	// Video Codecs
-		Vp8 = kCodecTypeVideo + 1,
+	Vp8 = kCodecTypeVideo + 1,
 	Vp9,
 	H264,
 	I420,
@@ -129,7 +118,6 @@ enum class CodecType : int32_t
 	Flexfec,
 	Generic,
 	Stereo,
-
 	Unknown
 };
 

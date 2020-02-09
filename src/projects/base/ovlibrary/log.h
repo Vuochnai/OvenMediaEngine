@@ -51,13 +51,24 @@ typedef enum OVLogLevel
 		OVLogLevelCritical
 } OVLogLevel;
 
-#define logd(tag, format, ...)                        ov_log_internal(OVLogLevelDebug,          tag, __FILE__, __LINE__, __PRETTY_FUNCTION__, format, ## __VA_ARGS__) // NOLINT
+#if DEBUG
+#   define logd(tag, format, ...)                     ov_log_internal(OVLogLevelDebug,          tag, __FILE__, __LINE__, __PRETTY_FUNCTION__, format, ## __VA_ARGS__) // NOLINT
+#else
+#   define logd                                       ov_log_dummy
+
+constexpr void ov_log_dummy(...)
+{
+}
+
+#endif // DEBUG
 #define logi(tag, format, ...)                        ov_log_internal(OVLogLevelInformation,    tag, __FILE__, __LINE__, __PRETTY_FUNCTION__, format, ## __VA_ARGS__) // NOLINT
 #define logw(tag, format, ...)                        ov_log_internal(OVLogLevelWarning,        tag, __FILE__, __LINE__, __PRETTY_FUNCTION__, format, ## __VA_ARGS__) // NOLINT
 #define loge(tag, format, ...)                        ov_log_internal(OVLogLevelError,          tag, __FILE__, __LINE__, __PRETTY_FUNCTION__, format, ## __VA_ARGS__) // NOLINT
 #define logc(tag, format, ...)                        ov_log_internal(OVLogLevelCritical,       tag, __FILE__, __LINE__, __PRETTY_FUNCTION__, format, ## __VA_ARGS__) // NOLINT
 
 #define logtd(format, ...)                            logd(OV_LOG_TAG, format, ## __VA_ARGS__) // NOLINT
+#define logtp(format, ...)                            logd(OV_LOG_TAG ".Packet", format, ## __VA_ARGS__) // NOLINT
+
 #define logti(format, ...)                            logi(OV_LOG_TAG, format, ## __VA_ARGS__) // NOLINT
 #define logtw(format, ...)                            logw(OV_LOG_TAG, format, ## __VA_ARGS__) // NOLINT
 #define logte(format, ...)                            loge(OV_LOG_TAG, format, ## __VA_ARGS__) // NOLINT
@@ -85,6 +96,8 @@ void ov_log_reset_enable();
 void ov_log_set_enable(const char *tag_regex, OVLogLevel level, bool is_enabled);
 
 void ov_log_internal(OVLogLevel level, const char *tag, const char *file, int line, const char *method, const char *format, ...);
+
+void ov_log_set_path(const char *log_path);
 
 #ifdef __cplusplus
 }

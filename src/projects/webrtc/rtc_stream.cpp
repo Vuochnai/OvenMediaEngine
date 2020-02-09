@@ -3,13 +3,14 @@
 #include "rtc_application.h"
 #include "rtc_session.h"
 
-using namespace MediaCommonType;
+using namespace common;
 
 std::shared_ptr<RtcStream> RtcStream::Create(const std::shared_ptr<Application> application,
-                                             const StreamInfo &info)
+                                             const StreamInfo &info,
+                                             uint32_t worker_count)
 {
 	auto stream = std::make_shared<RtcStream>(application, info);
-	if(!stream->Start())
+	if(!stream->Start(worker_count))
 	{
 		return nullptr;
 	}
@@ -21,6 +22,7 @@ RtcStream::RtcStream(const std::shared_ptr<Application> application,
 	: Stream(application, info)
 {
 	_certificate = application->GetSharedPtrAs<RtcApplication>()->GetCertificate();
+	_vp8_picture_id = 0x8000; // 1 {000 0000 0000 0000} 1 is marker for 15 bit length
 }
 
 RtcStream::~RtcStream()
@@ -29,11 +31,11 @@ RtcStream::~RtcStream()
 	Stop();
 }
 
-bool RtcStream::Start()
+bool RtcStream::Start(uint32_t worker_count)
 {
 	// OFFER SDP 생성
 	_offer_sdp = std::make_shared<SessionDescription>();
-	_offer_sdp->SetOrigin("OvenMediaEngine", ov::Random::GenerateInteger(), 2, "IN", 4, "127.0.0.1");
+	_offer_sdp->SetOrigin("OvenMediaEngine", ov::Random::GenerateUInt32(), 2, "IN", 4, "127.0.0.1");
 	_offer_sdp->SetTiming(0, 0);
 	_offer_sdp->SetIceOption("trickle");
 	_offer_sdp->SetIceUfrag(ov::Random::GenerateString(8));
@@ -50,60 +52,83 @@ bool RtcStream::Start()
 	std::shared_ptr<MediaDescription> video_media_desc = nullptr;
 	std::shared_ptr<MediaDescription> audio_media_desc = nullptr;
 
+	bool first_video_desc = true;
+	bool first_audio_desc = true;
+
 	for(auto &track_item : _tracks)
 	{
-		auto sdp_support_codec = PayloadAttr::SupportCodec::Unknown;
+		ov::String codec = "";
 		auto &track = track_item.second;
 
 		switch(track->GetMediaType())
 		{
 			case MediaType::Video:
 			{
+				auto payload = std::make_shared<PayloadAttr>();
+
 				switch(track->GetCodecId())
 				{
 					case MediaCodecId::Vp8:
-						sdp_support_codec = PayloadAttr::SupportCodec::Vp8;
+						codec = "VP8";
 						break;
 					case MediaCodecId::H264:
-						sdp_support_codec = PayloadAttr::SupportCodec::H264;
+						codec = "H264";
+
+						payload->SetFmtp(ov::String::FormatString(
+							// NonInterleaved => packetization-mode=1
+							// baseline & lvl 3.1 => profile-level-id=42e01f
+							"packetization-mode=1;profile-level-id=%x",
+							0x42e01f
+						));
+
 						break;
 					default:
 						logtw("Unsupported codec(%d) is being input from media track", track->GetCodecId());
 						continue;
 				}
 
-				// 현재 동시에 1개의 video만 지원
-				OV_ASSERT2(video_media_desc == nullptr);
+				if(first_video_desc)
+				{
+					video_media_desc = std::make_shared<MediaDescription>(_offer_sdp);
+					video_media_desc->SetConnection(4, "0.0.0.0");
+					// TODO(dimiden): Prevent duplication
+					video_media_desc->SetMid(ov::Random::GenerateString(6));
+					video_media_desc->SetSetup(MediaDescription::SetupType::ActPass);
+					video_media_desc->UseDtls(true);
+					video_media_desc->UseRtcpMux(true);
+					video_media_desc->SetDirection(MediaDescription::Direction::SendOnly);
+					video_media_desc->SetMediaType(MediaDescription::MediaType::Video);
+					video_media_desc->SetCname(ov::Random::GenerateUInt32(), ov::Random::GenerateString(16));
 
-				video_media_desc = std::make_shared<MediaDescription>(_offer_sdp);
-				video_media_desc->SetConnection(4, "0.0.0.0");
-				// TODO(dimiden): Prevent duplication
-				video_media_desc->SetMid(ov::Random::GenerateString(6));
-				video_media_desc->SetSetup(MediaDescription::SetupType::ActPass);
-				video_media_desc->UseDtls(true);
-				video_media_desc->UseRtcpMux(true);
-				video_media_desc->SetDirection(MediaDescription::Direction::SendOnly);
-				video_media_desc->SetMediaType(MediaDescription::MediaType::Video);
-				video_media_desc->SetCname(ov::Random::GenerateInteger(), ov::Random::GenerateString(16));
+					_offer_sdp->AddMedia(video_media_desc);
 
-				auto payload = std::make_shared<PayloadAttr>();
+					first_video_desc = false;
+				}
+
 				//TODO(getroot): WEBRTC에서는 TIMEBASE를 무조건 90000을 쓰는 것으로 보임, 정확히 알아볼것
-				payload->SetRtpmap(sdp_support_codec, 90000);
+				payload->SetRtpmap(track->GetId(), codec, 90000);
 
 				video_media_desc->AddPayload(payload);
 
-				// WebRTC에서 사용하는 Track만 별도로 관리한다.
-				AddRtcTrack(payload->GetId(), track);
+				// RTP Packetizer를 추가한다.
+				AddPacketizer(false, payload->GetId(), video_media_desc->GetSsrc());
 
 				break;
 			}
 
 			case MediaType::Audio:
 			{
+				auto payload = std::make_shared<PayloadAttr>();
+
 				switch(track->GetCodecId())
 				{
 					case MediaCodecId::Opus:
-						sdp_support_codec = PayloadAttr::SupportCodec::Opus;
+						codec = "OPUS";
+
+						// Enable inband-fec
+						// a=fmtp:111 maxplaybackrate=16000; useinbandfec=1; maxaveragebitrate=20000
+						 payload->SetFmtp("stereo=1;useinbandfec=1;");
+
 						break;
 
 					default:
@@ -111,28 +136,29 @@ bool RtcStream::Start()
 						continue;
 				}
 
-				// 현재 동시에 1개의 audio만 지원
-				OV_ASSERT2(audio_media_desc == nullptr);
+				if(first_audio_desc)
+				{
+					audio_media_desc = std::make_shared<MediaDescription>(_offer_sdp);
+					audio_media_desc->SetConnection(4, "0.0.0.0");
+					// TODO(dimiden): Need to prevent duplication
+					audio_media_desc->SetMid(ov::Random::GenerateString(6));
+					audio_media_desc->SetSetup(MediaDescription::SetupType::ActPass);
+					audio_media_desc->UseDtls(true);
+					audio_media_desc->UseRtcpMux(true);
+					audio_media_desc->SetDirection(MediaDescription::Direction::SendOnly);
+					audio_media_desc->SetMediaType(MediaDescription::MediaType::Audio);
+					audio_media_desc->SetCname(ov::Random::GenerateUInt32(), ov::Random::GenerateString(16));
+					_offer_sdp->AddMedia(audio_media_desc);
+					first_audio_desc = false;
+				}
 
-				audio_media_desc = std::make_shared<MediaDescription>(_offer_sdp);
-				audio_media_desc->SetConnection(4, "0.0.0.0");
-				// TODO(dimiden): Need to prevent duplication
-				audio_media_desc->SetMid(ov::Random::GenerateString(6));
-				audio_media_desc->SetSetup(MediaDescription::SetupType::ActPass);
-				audio_media_desc->UseDtls(true);
-				audio_media_desc->UseRtcpMux(true);
-				audio_media_desc->SetDirection(MediaDescription::Direction::SendOnly);
-				audio_media_desc->SetMediaType(MediaDescription::MediaType::Audio);
-				audio_media_desc->SetCname(ov::Random::GenerateInteger(), ov::Random::GenerateString(16));
-
-				auto payload = std::make_shared<PayloadAttr>();
 				// TODO(dimiden): Need to change to transcoding profile's bitrate and channel
-				payload->SetRtpmap(sdp_support_codec, 48000, "2");
+				payload->SetRtpmap(track->GetId(), codec, 48000, "2");
 
 				audio_media_desc->AddPayload(payload);
 
-				// WebRTC에서 사용하는 Track만 별도로 관리한다.
-				AddRtcTrack(payload->GetId(), track);
+				// RTP Packetizer를 추가한다.
+				AddPacketizer(true, payload->GetId(), audio_media_desc->GetSsrc());
 
 				break;
 			}
@@ -144,26 +170,29 @@ bool RtcStream::Start()
 		}
 	}
 
-	// Simulate audio or video only (test purpose)
-	// video_media_desc = nullptr;
-	// audio_media_desc = nullptr;
+	if (video_media_desc)
+	{
+        // RED & ULPFEC
+        auto red_payload = std::make_shared<PayloadAttr>();
+        red_payload->SetRtpmap(RED_PAYLOAD_TYPE, "red", 90000);
+        auto ulpfec_payload = std::make_shared<PayloadAttr>();
+        ulpfec_payload->SetRtpmap(ULPFEC_PAYLOAD_TYPE, "ulpfec", 90000);
 
-	// Connect Media descriptions and SDP
-	_offer_sdp->AddMedia(video_media_desc);
-	_offer_sdp->AddMedia(audio_media_desc);
+        video_media_desc->AddPayload(red_payload);
+        video_media_desc->AddPayload(ulpfec_payload);
+    }
 
 	ov::String offer_sdp_text;
 	_offer_sdp->ToString(offer_sdp_text);
 
 	logti("Stream is created : %s/%u", GetName().CStr(), GetId());
-	logtd("%s", offer_sdp_text.CStr());
 
-	return Stream::Start();
+	return Stream::Start(worker_count);
 }
 
 bool RtcStream::Stop()
 {
-	_rtc_track.clear();
+	_packetizers.clear();
 
 	return Stream::Stop();
 }
@@ -173,20 +202,35 @@ std::shared_ptr<SessionDescription> RtcStream::GetSessionDescription()
 	return _offer_sdp;
 }
 
-std::shared_ptr<RtcSession> RtcStream::FindRtcSessionByPeerSDPSessionID(uint32_t session_id)
+bool RtcStream::OnRtpPacketized(std::shared_ptr<RtpPacket> packet)
 {
-	// 모든 Session에 Frame을 전달한다.
-	for(auto const &x : GetSessionMap())
-	{
-		auto session = std::static_pointer_cast<RtcSession>(x.second);
+	uint32_t rtp_payload_type = packet->PayloadType();
+	uint32_t red_block_pt = 0;
+	uint32_t origin_pt_of_fec = 0;
 
-		if(session->GetPeerSDP() != nullptr && session->GetPeerSDP()->GetSessionId() == session_id)
+	if(rtp_payload_type == RED_PAYLOAD_TYPE)
+	{
+		red_block_pt = packet->Header()[packet->HeadersSize()-1];
+
+		// RED includes FEC packet or Media packet.
+		if(packet->IsUlpfec())
 		{
-			return session;
+			origin_pt_of_fec = packet->OriginPayloadType();
 		}
 	}
 
-	return nullptr;
+	// We make payload_type with the following structure:
+	// 0               8                 16             24                 32
+	//                 | origin_pt_of_fec | red block_pt | rtp_payload_type |
+	uint32_t payload_type = rtp_payload_type | (red_block_pt << 8) | (origin_pt_of_fec << 16);
+	BroadcastPacket(payload_type, packet->GetData());
+
+	return true;
+}
+
+bool RtcStream::OnRtcpPacketized(std::shared_ptr<RtcpPacket> packet)
+{
+	return true;
 }
 
 void RtcStream::SendVideoFrame(std::shared_ptr<MediaTrack> track,
@@ -205,26 +249,20 @@ void RtcStream::SendVideoFrame(std::shared_ptr<MediaTrack> track,
 		MakeRtpVideoHeader(codec_info.get(), &rtp_video_header);
 	}
 
-	// 모든 Session에 Frame을 전달한다.
-	for(auto const &x : GetSessionMap())
+	// RTP Packetizing
+	// Track의 GetId와 PayloadType은 같다. Track의 ID로 Payload Type을 만들기 때문이다.
+	auto packetizer = GetPacketizer(track->GetId());
+	if(packetizer == nullptr)
 	{
-		auto session = x.second;
-
-		// RTP_RTCP는 Blocking 방식의 Packetizer이므로
-		// shared_ptr, unique_ptr을 사용하지 않아도 무방하다. 사실 다 고치기가 귀찮음 ㅠㅠ
-		// TODO(getroot): 향후 Performance 증가를 위해 RTP Packetize를 한번 하고 모든 Session에 전달하는 방법을
-		// 실험해보고 성능이 좋아지면 적용한다.
-		std::static_pointer_cast<RtcSession>(session)->SendOutgoingData(track,
-		                                                                encoded_frame->frame_type,
-		                                                                encoded_frame->time_stamp,
-		                                                                encoded_frame->buffer,
-		                                                                encoded_frame->length,
-		                                                                fragmentation.get(),
-		                                                                &rtp_video_header);
+		return;
 	}
-
-	// TODO(getroot): 향후 ov::Data로 변경한다.
-	delete[] encoded_frame->buffer;
+	// RTP_SENDER에 등록된 RtpRtcpSession에 의해서 Packetizing이 완료되면 OnRtpPacketized 함수가 호출된다.
+	packetizer->Packetize(encoded_frame->_frame_type,
+	                      encoded_frame->_time_stamp,
+	                      encoded_frame->_buffer->GetDataAs<uint8_t>(),
+	                      encoded_frame->_length,
+	                      fragmentation.get(),
+	                      &rtp_video_header);
 }
 
 void RtcStream::SendAudioFrame(std::shared_ptr<MediaTrack> track,
@@ -233,30 +271,37 @@ void RtcStream::SendAudioFrame(std::shared_ptr<MediaTrack> track,
                                std::unique_ptr<FragmentationHeader> fragmentation)
 {
 	// AudioFrame 데이터를 Protocol에 맞게 변환한다.
-
 	OV_ASSERT2(encoded_frame != nullptr);
-	OV_ASSERT2(encoded_frame->buffer != nullptr);
+	OV_ASSERT2(encoded_frame->_buffer != nullptr);
 
-	// 모든 Session에 Frame을 전달한다.
-	for(auto const &x : GetSessionMap())
+	// RTP Packetizing
+	// Track의 GetId와 PayloadType은 같다. Track의 ID로 Payload Type을 만들기 때문이다.
+	auto packetizer = GetPacketizer(track->GetId());
+	if(packetizer == nullptr)
 	{
-		auto session = x.second;
-
-		// RTP_RTCP는 Blocking 방식의 Packetizer이므로
-		// shared_ptr, unique_ptr을 사용하지 않아도 무방하다. 사실 다 고치기가 귀찮음 ㅠㅠ
-		// TODO(getroot): 향후 Performance 증가를 위해 RTP Packetize를 한번 하고 모든 Session에 전달하는 방법을
-		// 실험해보고 성능이 좋아지면 적용한다.
-		std::static_pointer_cast<RtcSession>(session)->SendOutgoingData(track,
-		                                                                encoded_frame->frame_type,
-		                                                                encoded_frame->time_stamp,
-		                                                                encoded_frame->buffer,
-		                                                                encoded_frame->length,
-		                                                                fragmentation.get(),
-		                                                                nullptr);
+		return;
 	}
 
-	// TODO(getroot): 향후 ov::Data로 변경한다.
-	delete[] encoded_frame->buffer;
+	packetizer->Packetize(encoded_frame->_frame_type,
+	                      encoded_frame->_time_stamp,
+	                      encoded_frame->_buffer->GetDataAs<uint8_t>(),
+	                      encoded_frame->_length,
+	                      fragmentation.get(),
+	                      nullptr);
+}
+
+uint16_t RtcStream::AllocateVP8PictureID()
+{
+	_vp8_picture_id++;
+
+	// PictureID is 7 bit or 15 bit. We use only 15 bit.
+	if(_vp8_picture_id == 0)
+	{
+		// 1{000 0000 0000 0000} is initial number. (first bit means to use 15 bit size)
+		_vp8_picture_id = 0x8000;
+	}
+
+	return _vp8_picture_id;
 }
 
 void RtcStream::MakeRtpVideoHeader(const CodecSpecificInfo *info, RTPVideoHeader *rtp_video_header)
@@ -266,7 +311,8 @@ void RtcStream::MakeRtpVideoHeader(const CodecSpecificInfo *info, RTPVideoHeader
 		case CodecType::Vp8:
 			rtp_video_header->codec = RtpVideoCodecType::Vp8;
 			rtp_video_header->codec_header.vp8.InitRTPVideoHeaderVP8();
-			rtp_video_header->codec_header.vp8.picture_id = info->codec_specific.vp8.picture_id;
+			// With Ulpfec, picture id is needed.
+			rtp_video_header->codec_header.vp8.picture_id = AllocateVP8PictureID();
 			rtp_video_header->codec_header.vp8.non_reference = info->codec_specific.vp8.non_reference;
 			rtp_video_header->codec_header.vp8.temporal_idx = info->codec_specific.vp8.temporal_idx;
 			rtp_video_header->codec_header.vp8.layer_sync = info->codec_specific.vp8.layer_sync;
@@ -279,20 +325,41 @@ void RtcStream::MakeRtpVideoHeader(const CodecSpecificInfo *info, RTPVideoHeader
 			rtp_video_header->codec_header.h264.packetization_mode = info->codec_specific.h264.packetization_mode;
 			rtp_video_header->simulcast_idx = info->codec_specific.h264.simulcast_idx;
 			return;
+
+		case CodecType::Opus:
+		case CodecType::Vp9:
+		case CodecType::I420:
+		case CodecType::Red:
+		case CodecType::Ulpfec:
+		case CodecType::Flexfec:
+		case CodecType::Generic:
+		case CodecType::Stereo:
+		case CodecType::Unknown:
+		default:
+			break;
 	}
 }
 
-void RtcStream::AddRtcTrack(uint32_t payload_type, std::shared_ptr<MediaTrack> track)
+void RtcStream::AddPacketizer(bool audio, uint8_t payload_type, uint32_t ssrc)
 {
-	_rtc_track[payload_type] = track;
+	auto packetizer = std::make_shared<RtpPacketizer>(audio, RtpRtcpPacketizerInterface::GetSharedPtr());
+	packetizer->SetPayloadType(payload_type);
+	packetizer->SetSSRC(ssrc);
+
+	if(!audio)
+	{
+		packetizer->SetUlpfec(RED_PAYLOAD_TYPE, ULPFEC_PAYLOAD_TYPE);
+	}
+
+	_packetizers[payload_type] = packetizer;
 }
 
-std::shared_ptr<MediaTrack> RtcStream::GetRtcTrack(uint32_t payload_type)
+std::shared_ptr<RtpPacketizer> RtcStream::GetPacketizer(uint8_t payload_type)
 {
-	if(!_rtc_track.count(payload_type))
+	if(!_packetizers.count(payload_type))
 	{
 		return nullptr;
 	}
 
-	return _rtc_track[payload_type];
+	return _packetizers[payload_type];
 }
